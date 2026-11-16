@@ -1,0 +1,15 @@
+[package]
+name = "input-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux uinput backend for PhoneController (no root required)"
+
+[dependencies]
+libc = "0.2"
+tracing.workspace = true
+input-core = { path = "../input-core" }
+pc-protocol = { path = "../pc-protocol" }
+
+[dev-dependencies]
+rand.workspace = true

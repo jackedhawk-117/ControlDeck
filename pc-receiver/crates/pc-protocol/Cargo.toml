@@ -1,0 +1,16 @@
+[package]
+name = "pc-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PhoneController wire protocol v1: framing, handshake, crypto, input payloads"
+
+[dependencies]
+aes-gcm.workspace = true
+hkdf.workspace = true
+hmac = "0.12"
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

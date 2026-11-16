@@ -1,0 +1,15 @@
+[package]
+name = "input-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Windows SendInput backend for PhoneController"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
+
+[dependencies]
+input-core = { path = "../input-core" }

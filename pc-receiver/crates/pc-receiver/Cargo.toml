@@ -1,0 +1,33 @@
+[package]
+name = "pc-receiver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PhoneController PC receiver server and phone simulator"
+
+[[bin]]
+name = "phonecontroller-receiver"
+path = "src/main.rs"
+
+[[bin]]
+name = "phonecontroller-simulator"
+path = "src/bin/simulator.rs"
+
+
+[target.'cfg(target_os = "linux")'.dependencies]
+input-linux = { path = "../input-linux" }
+
+[target.'cfg(windows)'.dependencies]
+input-windows = { path = "../input-windows" }
+
+[dependencies]
+pc-protocol = { path = "../pc-protocol" }
+input-core = { path = "../input-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+rand.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "input-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform-free input state machine and InputBackend abstraction"
+
+[dependencies]
+pc-protocol = { path = "../pc-protocol" }
+thiserror.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

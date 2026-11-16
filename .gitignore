@@ -1,0 +1,19 @@
+# Rust
+/pc-receiver/target/
+
+# Android / Gradle
+/android-app/.gradle/
+/android-app/.kotlin/
+/android-app/build/
+/android-app/app/build/
+/android-app/local.properties
+/android-app/.idea/
+*.iml
+*.apk
+*.aab
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
