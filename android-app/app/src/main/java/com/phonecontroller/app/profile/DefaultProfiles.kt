@@ -1,5 +1,9 @@
 package com.phonecontroller.app.profile
 
+import com.phonecontroller.app.input.GyroActivationMode
+import com.phonecontroller.app.input.GyroCellAction
+import com.phonecontroller.app.input.GyroConfig
+import com.phonecontroller.app.input.GyroSensorSource
 import com.phonecontroller.app.input.Keycodes
 import com.phonecontroller.app.input.TouchpadConfig
 import com.phonecontroller.app.net.Protocol
@@ -165,15 +169,51 @@ object DefaultProfiles {
                 shape = ButtonShape.CIRCLE,
                 opacity = 0.75f,
             ),
+
+            // Gyro aiming: hold GYRO to add fine motion aim; CENTER re-primes
+            // the neutral pose without moving the camera.
+            CellConfig(
+                id = "fps_gyro",
+                label = "GYRO",
+                type = CellType.GYRO,
+                xPct = 0.40f,
+                yPct = 0.20f,
+                widthDp = 58,
+                heightDp = 44,
+                shape = ButtonShape.PILL,
+                opacity = 0.85f,
+            ),
+            CellConfig(
+                id = "fps_recenter",
+                label = "CENTER",
+                type = CellType.GYRO,
+                gyroAction = GyroCellAction.RECENTER,
+                xPct = 0.52f,
+                yPct = 0.20f,
+                widthDp = 62,
+                heightDp = 44,
+                shape = ButtonShape.PILL,
+                opacity = 0.75f,
+            ),
         )
         return GameProfile(
             id = FPS_PROFILE_ID,
             name = "First-Person Shooter",
-            description = "Unconstrained canvas layout with analog WASD joystick, jump, sprint, and aim/fire triggers.",
+            description = "Unconstrained canvas layout with analog WASD joystick, jump, sprint, aim/fire triggers and hold-to-aim gyro with recenter.",
             rows = 3,
             cols = 4,
             cells = cells,
             touchpad = TouchpadConfig(sensitivityX = 0.85f, sensitivityY = 0.85f, acceleration = 0.20f),
+            gyro = GyroConfig(
+                enabled = true,
+                activationMode = GyroActivationMode.HOLD,
+                sensorSource = GyroSensorSource.FUSED,
+                sensitivityX = 2.6f,
+                sensitivityY = 2.2f,
+                deadzoneDps = 1.0f,
+                smoothing = 0.25f,
+                adsMultiplier = 0.60f,
+            ),
         )
     }
 

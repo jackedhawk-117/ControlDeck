@@ -48,6 +48,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -58,7 +59,13 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.phonecontroller.app.AppModel
+import com.phonecontroller.app.input.AndroidGyroSource
 import com.phonecontroller.app.input.ControlAction
+import com.phonecontroller.app.input.GyroActivationMode
+import com.phonecontroller.app.input.GyroCalibrationResult
+import com.phonecontroller.app.input.GyroCellAction
+import com.phonecontroller.app.input.GyroConfig
+import com.phonecontroller.app.input.GyroMapper
 import com.phonecontroller.app.input.InputTracker
 import com.phonecontroller.app.input.Keycodes
 import com.phonecontroller.app.input.MacroEngine
@@ -114,14 +121,27 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
     var isEditorMode by remember { mutableStateOf(false) }
     var showProfileManager by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showGyroSettings by remember { mutableStateOf(false) }
     var showDiagnostics by remember { mutableStateOf(false) }
 
     val tracker = remember { InputTracker() }
     val motion = remember { MotionAccumulator() }
+    val gyroSource = remember(context) { AndroidGyroSource(context) }
+    val gyroMapper = remember { GyroMapper(activeProfile.gyro) }
     var pressedIds by remember { mutableStateOf(setOf<String>()) }
     var toggledIds by remember { mutableStateOf(setOf<String>()) }
     var runningMacros by remember { mutableStateOf(setOf<String>()) }
     var touchpadSaveJob by remember { mutableStateOf<Job?>(null) }
+    var gyroSaveJob by remember { mutableStateOf<Job?>(null) }
+
+    // Gyro arming state. HOLD and REGION are momentary; TOGGLE latches until
+    // the profile changes or the session ends.
+    var gyroHeld by remember { mutableStateOf(false) }
+    var gyroToggled by remember { mutableStateOf(false) }
+    var gyroRegionActive by remember { mutableStateOf(false) }
+    var gyroCalibrationStatus by remember { mutableStateOf<String?>(null) }
+    var pendingCalibration by remember { mutableStateOf<GyroCalibrationResult?>(null) }
+    var gyroRatesHz by remember { mutableStateOf(0 to 0) }
 
     // Macros run on the Compose/UI dispatcher and feed the same tracker as
     // touch controls. A dropped connection therefore cancels and releases them.
@@ -138,6 +158,113 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
 
     val released = state !is ConnState.Paired
 
+    // ---- Gyro aiming (Milestone 6) ----
+    // Everything below runs phone-side; only the resulting mouse deltas reach
+    // the receiver, so the wire protocol is unchanged.
+    val gyroConfig = activeProfile.gyro
+    // Stop the sensors for the grid editor and the touchpad/profile overlays;
+    // the gyro tuning screen and stats HUD keep them running for calibration
+    // and live rate readouts.
+    val gyroSensorsWanted = gyroConfig.enabled && !released &&
+        !isEditorMode && !showSettings && !showProfileManager
+    val gyroActive = gyroSensorsWanted &&
+        !isEditorMode && !showSettings && !showGyroSettings && !showProfileManager &&
+        when (gyroConfig.activationMode) {
+            GyroActivationMode.ALWAYS -> true
+            GyroActivationMode.HOLD -> gyroHeld
+            GyroActivationMode.TOGGLE -> gyroToggled
+            GyroActivationMode.REGION -> gyroRegionActive
+        }
+
+    // Sensors run only while this profile wants them, saving battery in the
+    // editor and on every profile that leaves gyro disabled.
+    DisposableEffect(gyroSource, gyroSensorsWanted) {
+        if (gyroSensorsWanted) gyroSource.start()
+        onDispose { gyroSource.stop() }
+    }
+
+    LaunchedEffect(gyroConfig) {
+        gyroMapper.setConfig(gyroConfig)
+    }
+
+    LaunchedEffect(activeProfile.id) {
+        gyroHeld = false
+        gyroToggled = false
+        gyroRegionActive = false
+        gyroCalibrationStatus = null
+    }
+
+    // Activation state is fed to the mapper on every tick; whether a release
+    // re-primes the neutral pose is controlled by `recenterOnRelease`.
+    val gyroActiveNow by rememberUpdatedState(gyroActive)
+
+    // 120 Hz gyro tick. Sensor callbacks only publish a mailbox; all mapping,
+    // smoothing and Q16.16 encoding happen here on a single thread.
+    LaunchedEffect(conn, gyroSensorsWanted) {
+        if (!gyroSensorsWanted) return@LaunchedEffect
+        val gyroValues = FloatArray(3)
+        val quaternionValues = FloatArray(4)
+        while (isActive) {
+            delay(8)
+            val nowNs = System.nanoTime()
+            val gyroTs = gyroSource.readGyro(gyroValues)
+            val quatTs = gyroSource.readQuaternion(quaternionValues)
+            gyroMapper.setActive(gyroActiveNow)
+            val out = gyroMapper.update(
+                gyro = gyroValues,
+                gyroTsNs = gyroTs,
+                quaternion = quaternionValues,
+                quatTsNs = quatTs,
+                nowNs = nowNs,
+                adsActive = tracker.isMouseButtonHeld(Protocol.MOUSE_RIGHT),
+            )
+            if (out.dxQ16 != 0 || out.dyQ16 != 0) motion.add(out)
+            gyroMapper.takeCalibrationResult()?.let { pendingCalibration = it }
+        }
+    }
+
+    // Diagnostics: samples per second as delivered by the sensor service.
+    LaunchedEffect(gyroSensorsWanted) {
+        if (!gyroSensorsWanted) {
+            gyroRatesHz = 0 to 0
+            return@LaunchedEffect
+        }
+        while (isActive) {
+            delay(1000)
+            gyroRatesHz = gyroSource.takeSampleRatesHz(System.nanoTime())
+        }
+    }
+
+    // Calibration completes on the tick coroutine; persist the learned bias
+    // from here so profile state is updated with the latest profile object.
+    LaunchedEffect(pendingCalibration) {
+        val result = pendingCalibration ?: return@LaunchedEffect
+        pendingCalibration = null
+        if (!result.accepted) {
+            gyroCalibrationStatus = "Calibration rejected — keep the phone still and retry"
+            return@LaunchedEffect
+        }
+        val base = activeProfile
+        val updated = base.copy(
+            gyro = base.gyro.copy(
+                biasX = result.biasX,
+                biasY = result.biasY,
+                biasZ = result.biasZ,
+            ),
+        )
+        activeProfile = updated
+        gyroMapper.setConfig(updated.gyro)
+        gyroSaveJob?.cancel()
+        profileStore.saveProfile(updated)
+        gyroCalibrationStatus = String.format(
+            java.util.Locale.US,
+            "Calibrated: %.3f / %.3f / %.3f rad/s",
+            result.biasX,
+            result.biasY,
+            result.biasZ,
+        )
+    }
+
     // A macro job runs in the app scope, not the composition scope. Cancel it
     // when the gameplay screen is disposed so it cannot keep running (and
     // enqueueing to a closed connection) after Back/Disconnect.
@@ -150,13 +277,18 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
         if (released) {
             macroEngine.cancelAll()
             touchpadSaveJob?.cancel()
+            gyroSaveJob?.cancel()
             tracker.clear()
             motion.clear()
             pressedIds = emptySet()
             toggledIds = emptySet()
             runningMacros = emptySet()
+            gyroHeld = false
+            gyroToggled = false
+            gyroRegionActive = false
             showSettings = false
             showProfileManager = false
+            showGyroSettings = false
             isEditorMode = false
             showDiagnostics = false
         }
@@ -202,12 +334,22 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
      */
     fun releaseAllInputs() {
         macroEngine.cancelAll()
+        touchpadSaveJob?.cancel()
+        gyroSaveJob?.cancel()
         val events = tracker.releaseAll()
         tracker.clear()
         motion.clear()
+        // Opening an overlay, switching profiles or disconnecting must not
+        // leave a stored neutral pose that could jump when play resumes.
+        if (gyroMapper.isCalibrating) gyroCalibrationStatus = "Calibration cancelled"
+        gyroMapper.cancelCalibration()
+        gyroMapper.recenter()
         pressedIds = emptySet()
         toggledIds = emptySet()
         runningMacros = emptySet()
+        gyroHeld = false
+        gyroToggled = false
+        gyroRegionActive = false
         if (conn.state.value is ConnState.Paired) {
             if (events.isNotEmpty()) conn.enqueueDelta(events)
             model.scope.launch { runCatching { conn.sendReset() } }
@@ -273,6 +415,11 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
         releaseAllInputs()
         val normalized = newProfile.copy(cells = newProfile.normalizedCells())
         activeProfile = normalized
+        gyroMapper.setConfig(normalized.gyro)
+        gyroHeld = false
+        gyroToggled = false
+        gyroRegionActive = false
+        gyroCalibrationStatus = null
         profileStore.setActiveProfileId(normalized.id)
         model.scope.launch { runCatching { conn.sendProfileInfo(normalized.name) } }
     }
@@ -288,6 +435,34 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
             delay(400)
             profileStore.saveProfile(updated)
         }
+    }
+
+    fun updateGyroConfig(next: GyroConfig) {
+        val clean = next.sanitized()
+        val updated = activeProfile.copy(gyro = clean)
+        activeProfile = updated
+        gyroMapper.setConfig(clean)
+        if (!clean.enabled) {
+            gyroMapper.cancelCalibration()
+            gyroHeld = false
+            gyroToggled = false
+            gyroRegionActive = false
+        }
+        gyroSaveJob?.cancel()
+        gyroSaveJob = model.scope.launch {
+            delay(400)
+            profileStore.saveProfile(updated)
+        }
+    }
+
+    fun closeGyroSettings() {
+        gyroSaveJob?.cancel()
+        profileStore.saveProfile(activeProfile)
+        // The phone may have moved while tuning; re-prime so re-arming cannot
+        // replay that pose change as a jump (matters when recenterOnRelease
+        // is disabled).
+        gyroMapper.recenter()
+        showGyroSettings = false
     }
 
     // ---- Layout Editing Mode ----
@@ -312,8 +487,33 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
             onClose = {
                 touchpadSaveJob?.cancel()
                 profileStore.saveProfile(activeProfile)
+                gyroMapper.recenter()
                 showSettings = false
             },
+        )
+        return
+    }
+
+    // ---- Gyro Settings Overlay ----
+    if (showGyroSettings) {
+        GyroSettingsScreen(
+            config = gyroConfig,
+            gyroAvailable = gyroSource.hasGyro,
+            orientationAvailable = gyroSource.hasOrientation,
+            orientationLabel = gyroSource.orientationLabel,
+            sensorRatesHz = gyroRatesHz,
+            active = gyroActive,
+            calibrationStatus = gyroCalibrationStatus,
+            onChange = ::updateGyroConfig,
+            onCalibrate = {
+                gyroCalibrationStatus = "Calibrating — hold the phone still"
+                gyroMapper.beginCalibration(System.nanoTime())
+            },
+            onRecenter = {
+                gyroMapper.recenter()
+                gyroCalibrationStatus = "Neutral pose stored; next sample is the baseline"
+            },
+            onClose = ::closeGyroSettings,
         )
         return
     }
@@ -346,7 +546,30 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .safeDrawingPadding(),
+            .safeDrawingPadding()
+            .pointerInput(gyroConfig) {
+                // Observe region touches in the Initial pass without consuming
+                // them, so aiming and normal controls work simultaneously.
+                if (!gyroConfig.enabled ||
+                    gyroConfig.activationMode != GyroActivationMode.REGION
+                ) {
+                    gyroRegionActive = false
+                } else {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val width = size.width.toFloat().coerceAtLeast(1f)
+                            val height = size.height.toFloat().coerceAtLeast(1f)
+                            gyroRegionActive = event.changes.any { change ->
+                                change.pressed && gyroConfig.containsRegion(
+                                    (change.position.x / width).coerceIn(0f, 1f),
+                                    (change.position.y / height).coerceIn(0f, 1f),
+                                )
+                            }
+                        }
+                    }
+                }
+            },
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val canvasWidthPx = constraints.maxWidth.toFloat()
@@ -367,6 +590,44 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
                         .width((maxWidth * activeProfile.touchpad.widthFraction))
                         .align(Alignment.CenterEnd),
                 )
+            }
+
+            // Touch-region activation rectangle: purely visual, never consumes
+            // pointer input. Drawn above the fallback touchpad so it stays
+            // visible wherever the region overlaps the camera surface.
+            if (gyroConfig.enabled && gyroConfig.activationMode == GyroActivationMode.REGION) {
+                val regionLeftPx = gyroConfig.regionXPct * canvasWidthPx
+                val regionTopPx = gyroConfig.regionYPct * canvasHeightPx
+                val regionWidthPx = gyroConfig.regionWidthPct * canvasWidthPx
+                val regionHeightPx = gyroConfig.regionHeightPct * canvasHeightPx
+                Box(
+                    modifier = Modifier
+                        .offset {
+                            IntOffset(regionLeftPx.roundToInt(), regionTopPx.roundToInt())
+                        }
+                        .size(
+                            with(density) { regionWidthPx.toDp() },
+                            with(density) { regionHeightPx.toDp() },
+                        )
+                        .background(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
+                            RoundedCornerShape(10.dp),
+                        )
+                        .border(
+                            1.dp,
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                            RoundedCornerShape(10.dp),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "GYRO ZONE",
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp,
+                        letterSpacing = 2.sp,
+                    )
+                }
             }
 
             // Render all canvas buttons, joysticks, and custom touchpads
@@ -414,6 +675,51 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .clip(clipShape),
+                            )
+                        }
+
+                        CellType.GYRO -> {
+                            val activates = cell.gyroAction == GyroCellAction.ACTIVATE
+                            val held = if (activates) {
+                                when (gyroConfig.activationMode) {
+                                    GyroActivationMode.HOLD -> gyroHeld
+                                    GyroActivationMode.TOGGLE -> gyroToggled
+                                    GyroActivationMode.ALWAYS -> gyroActive
+                                    GyroActivationMode.REGION -> gyroRegionActive
+                                }
+                            } else {
+                                cell.id in pressedIds
+                            }
+                            CanvasButton(
+                                label = cell.label,
+                                held = held,
+                                enabled = !released && gyroConfig.enabled,
+                                shape = clipShape,
+                                opacity = cell.opacity,
+                                tint = cell.customColor,
+                                modifier = Modifier.fillMaxSize(),
+                                onDown = {
+                                    if (!activates) {
+                                        gyroMapper.recenter()
+                                        pressedIds = pressedIds + cell.id
+                                        gyroCalibrationStatus = "Camera recentered"
+                                    } else {
+                                        when (gyroConfig.activationMode) {
+                                            GyroActivationMode.HOLD -> gyroHeld = true
+                                            GyroActivationMode.TOGGLE ->
+                                                gyroToggled = !gyroToggled
+                                            // ALWAYS and REGION arm themselves.
+                                            else -> Unit
+                                        }
+                                    }
+                                },
+                                onUp = {
+                                    if (!activates) {
+                                        pressedIds = pressedIds - cell.id
+                                    } else if (gyroConfig.activationMode == GyroActivationMode.HOLD) {
+                                        gyroHeld = false
+                                    }
+                                },
                             )
                         }
 
@@ -529,6 +835,21 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
                         Text("Touchpad", fontSize = 11.sp)
                     }
                     OutlinedButton(
+                        onClick = {
+                            releaseAllInputs()
+                            showGyroSettings = true
+                        },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.height(28.dp),
+                    ) {
+                        Text(
+                            if (gyroActive) "Gyro ●" else "Gyro",
+                            fontSize = 11.sp,
+                            color = if (gyroActive) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                    OutlinedButton(
                         onClick = { showDiagnostics = !showDiagnostics },
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                         modifier = Modifier.height(28.dp),
@@ -556,6 +877,10 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
                 heldKeys = tracker.heldKeys(),
                 mouseBits = tracker.mouseBits(),
                 runningMacros = runningMacros.size,
+                gyroEnabled = gyroConfig.enabled,
+                gyroActive = gyroActive,
+                gyroRatesHz = gyroRatesHz,
+                gyroSource = gyroConfig.sensorSource.name,
                 onClose = { showDiagnostics = false },
                 modifier = Modifier
                     .align(Alignment.BottomStart)
@@ -578,6 +903,10 @@ private fun DiagnosticsPanel(
     heldKeys: IntArray,
     mouseBits: Int,
     runningMacros: Int,
+    gyroEnabled: Boolean,
+    gyroActive: Boolean,
+    gyroRatesHz: Pair<Int, Int>,
+    gyroSource: String,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -669,6 +998,22 @@ private fun DiagnosticsPanel(
             )
             DiagRow("Active keys", activeText)
             DiagRow("Macros", if (runningMacros > 0) "$runningMacros running" else "none")
+            DiagRow(
+                "Gyro",
+                when {
+                    !gyroEnabled -> "off in profile"
+                    gyroActive -> "aiming · $gyroSource"
+                    else -> "armed · $gyroSource"
+                },
+            )
+            DiagRow(
+                "Sensor rate",
+                if (gyroEnabled) {
+                    "${gyroRatesHz.first} gyro / ${gyroRatesHz.second} ori Hz"
+                } else {
+                    "sensors stopped"
+                },
+            )
         }
     }
 }
@@ -950,7 +1295,7 @@ private fun TouchpadSettingsScreen(
 }
 
 @Composable
-private fun TuningSlider(
+internal fun TuningSlider(
     label: String,
     valueLabel: String,
     value: Float,
@@ -984,7 +1329,7 @@ private fun TuningSlider(
 }
 
 @Composable
-private fun ToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+internal fun ToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,

@@ -5,13 +5,13 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[b]` blocked (r
 This file is the living implementation checklist (Engineering Rule 12). Update
 status after every milestone or significant change.
 
-Current position: **Milestones 1–5 implemented** (M1–M4 device-validated;
-M5 macro/UI validation is tracked in Milestone 7). Milestone 6 (gyroscope
-aiming) is next. The APK has been installed and validated on a motorola edge 70
-fusion (Android 17): discovery, PIN pairing, UDP keyboard/mouse input, touchpad
-camera, customizable freeform canvas editor, and per-profile switching with
-receiver RESET synchronization. Macros and the diagnostics HUD are implemented
-and covered by JVM tests; on-device macro execution is the next validation item.
+Current position: **Milestones 1–6 implemented** (M1–M4 device-validated;
+M5 macro/UI and M6 gyro validation are tracked in Milestone 7). The APK has
+been installed and validated on a motorola edge 70 fusion (Android 17):
+discovery, PIN pairing, UDP keyboard/mouse input, touchpad camera, customizable
+freeform canvas editor, and per-profile switching with receiver RESET
+synchronization. Macros, the diagnostics HUD and gyro aiming are implemented
+and covered by JVM tests; on-device macro execution and gyro validation remain.
 
 A second device session on 2026-11-16 re-verified fresh PIN pairing, Linux
 uinput delivery of mouse left/right/middle, all four joystick axes plus the
@@ -175,14 +175,31 @@ because the phone was not attached during this pass.
 
 ## Milestone 6 — Gyroscope
 
-- [ ] TYPE_GYROSCOPE + TYPE_ROTATION_VECTOR sensor collection
-- [ ] Quaternion world-frame yaw/pitch extraction; roll disabled by default
-- [ ] Bias calibration at rest + recenter action and auto-recenter
-- [ ] Deadzone, smoothing, axis inversion, sensitivity scaling, ADS profile
-- [ ] Activation modes: always / hold / toggle / touch region
-- [ ] Hybrid touchpad + gyro fusion into one mouse-delta pipeline
-- [ ] Gyro configuration screen and unit tests with synthetic sensor data
-      (design notes: `docs/GYRO-AIMING.md`)
+- [x] TYPE_GYROSCOPE + TYPE_ROTATION_VECTOR/`TYPE_GAME_ROTATION_VECTOR` collection
+      on a dedicated HandlerThread with a locked mailbox and live rate counters
+- [x] Quaternion world-frame yaw/pitch from the screen normal; roll produces no
+      camera movement (yaw/pitch can each be disabled)
+- [x] Runtime bias auto-calibration while disarmed + explicit 1 s calibration
+      with movement rejection; bias persisted per profile
+- [x] Dedicated recenter cell/action; configurable re-prime on hold release
+- [x] Deadzone, smoothing, per-axis inversion, sensitivity in px/°, per-tick
+      clamp, ADS (RMB) multiplier
+- [x] Activation modes: always / hold / toggle / touch region (region observed
+      in the Initial pointer pass without consuming touches)
+- [x] FUSED (default, drift-free) and GYRO (raw integration) source selection
+- [x] Hybrid touchpad + gyro fusion into one Q16.16 `MotionAccumulator`
+- [x] Gyro configuration screen, GYRO cell editor, `+ Gyro` control button,
+      FPS preset gyro cells/config, diagnostics state + sensor rates
+- [x] Unit tests with synthetic orientation/gyro data (25 tests), JSON
+      round-trip/legacy/hostile-import tests
+- [b] On-device sensor rates, drift, feel, orientations and hybrid aiming —
+      no adb device attached; see Milestone 7
+
+**Acceptance met (JVM/build):** the Android suite is **124 tests across 15
+classes**, 0 failures, including 25 synthetic gyro/orientation tests and 16
+profile-JSON tests; `assembleDebug` and `lintDebug` pass (0 lint errors), and
+the 56 Rust tests + clippy remain clean. On-device acceptance is intentionally
+not claimed.
 
 ## Milestone 7 — Cross-platform validation
 
@@ -199,6 +216,9 @@ because the phone was not attached during this pass.
 - [ ] Hotspot pairing/input latency capture and long-session soak
 - [ ] On-device profile switching and touchpad-settings persistence
 - [ ] On-device macro editor, step timing, cancel and evtest output verification
+- [ ] On-device gyro pass: sensor rates, FUSED/GYRO drift, calibration,
+      HOLD/TOGGLE/REGION activation, CENTER while aiming, hybrid touchpad +
+      gyro with fire/movement held, all four screen orientations
 - [ ] Android on-device multitouch chording, input-latency measurement, soak test
 - [ ] Network interruption / reconnection drills; no stuck inputs
 - [ ] Long-session soak test (≥2 h)
@@ -222,7 +242,7 @@ because the phone was not attached during this pass.
 | Windows runtime validation | No Windows machine; `SendInput` backend compiles under `cfg(windows)` only | Milestone 7 |
 | QR-code pairing | PIN pairing is implemented; QR adds camera/permission complexity | M8 candidate |
 | mDNS/Avahi advertisement | UDP broadcast + manual IP cover normal and AP-isolated networks | M8 candidate |
-| Gyro | Freeform profiles, macros and the layout editor are implemented; gyro remains design-documented | Milestone 6 |
+| Gyro device validation | Gyro math, sources, activation modes and calibration are JVM-tested with synthetic data; no physical sensor/drift/in-game validation yet | Milestone 7 |
 | Macro device validation | Macro model/engine/editor and diagnostics are JVM-tested (96 tests); the phone was not attached for on-device evtest of macro output and the new editor UI | Milestone 7 |
 | SPAKE2 pairing | Current HKDF+HMAC PIN scheme allows offline PIN brute force from a recorded handshake; LAN-scoped threat model | Security upgrade path |
 | Compose BOM pinned to 2026.06.01 | Newer BOMs require compileSdk 37, while this environment has SDK 36 | Revisit when SDK 37 is installed |

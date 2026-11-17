@@ -1,5 +1,9 @@
 package com.phonecontroller.app.profile
 
+import com.phonecontroller.app.input.GyroActivationMode
+import com.phonecontroller.app.input.GyroCellAction
+import com.phonecontroller.app.input.GyroConfig
+import com.phonecontroller.app.input.GyroSensorSource
 import com.phonecontroller.app.input.Keycodes
 import com.phonecontroller.app.input.TouchpadConfig
 import com.phonecontroller.app.net.Protocol
@@ -187,6 +191,140 @@ class ProfileJsonTest {
         assertEquals(5, parsed.size)
         assertEquals(defaults.map { it.id }, parsed.map { it.id })
         assertEquals(defaults.map { it.name }, parsed.map { it.name })
+    }
+
+    @Test
+    fun `gyro settings and cells roundtrip`() {
+        val original = GameProfile(
+            id = "gyro-profile",
+            name = "Gyro Test",
+            gyro = GyroConfig(
+                enabled = true,
+                activationMode = GyroActivationMode.TOGGLE,
+                sensorSource = GyroSensorSource.GYRO,
+                sensitivityX = 4.5f,
+                sensitivityY = 2.25f,
+                invertX = true,
+                enablePitch = false,
+                deadzoneDps = 2.5f,
+                smoothing = 0.4f,
+                maxPixelsPerTick = 150f,
+                adsMultiplier = 0.45f,
+                recenterOnRelease = false,
+                biasX = 0.01f,
+                biasY = -0.02f,
+                biasZ = 0.03f,
+                regionXPct = 0.2f,
+                regionYPct = 0.25f,
+                regionWidthPct = 0.5f,
+                regionHeightPct = 0.45f,
+            ),
+            cells = listOf(
+                CellConfig(
+                    id = "gy-activate",
+                    label = "GYRO",
+                    type = CellType.GYRO,
+                    gyroAction = GyroCellAction.ACTIVATE,
+                    xPct = 0.4f,
+                    yPct = 0.8f,
+                ),
+                CellConfig(
+                    id = "gy-recenter",
+                    label = "CENTER",
+                    type = CellType.GYRO,
+                    gyroAction = GyroCellAction.RECENTER,
+                    xPct = 0.5f,
+                    yPct = 0.2f,
+                ),
+            ),
+        )
+
+        val parsed = ProfileJson.parse(ProfileJson.serialize(original))
+        assertEquals(2, parsed.cells.size)
+        assertEquals(GyroCellAction.ACTIVATE, parsed.cells[0].gyroAction)
+        assertEquals(GyroCellAction.RECENTER, parsed.cells[1].gyroAction)
+
+        val gyro = parsed.gyro
+        assertTrue(gyro.enabled)
+        assertEquals(GyroActivationMode.TOGGLE, gyro.activationMode)
+        assertEquals(GyroSensorSource.GYRO, gyro.sensorSource)
+        assertEquals(4.5f, gyro.sensitivityX, 0.0001f)
+        assertEquals(2.25f, gyro.sensitivityY, 0.0001f)
+        assertTrue(gyro.invertX)
+        assertFalse(gyro.enablePitch)
+        assertEquals(2.5f, gyro.deadzoneDps, 0.0001f)
+        assertEquals(0.4f, gyro.smoothing, 0.0001f)
+        assertEquals(150f, gyro.maxPixelsPerTick, 0.0001f)
+        assertEquals(0.45f, gyro.adsMultiplier, 0.0001f)
+        assertFalse(gyro.recenterOnRelease)
+        assertEquals(0.01f, gyro.biasX, 0.0001f)
+        assertEquals(0.2f, gyro.regionXPct, 0.0001f)
+        assertEquals(0.45f, gyro.regionHeightPct, 0.0001f)
+    }
+
+    @Test
+    fun `legacy profile without gyro decodes a disabled default`() {
+        val parsed = ProfileJson.parse(
+            """{"id":"legacy-gyro","name":"Legacy","cells":[{"id":"gy","label":"GYRO","type":"GYRO"}]}""",
+        )
+        assertFalse(parsed.gyro.enabled)
+        assertEquals(GyroActivationMode.HOLD, parsed.gyro.activationMode)
+        assertEquals(GyroSensorSource.FUSED, parsed.gyro.sensorSource)
+        assertEquals(3.0f, parsed.gyro.sensitivityX, 0.0001f)
+        assertEquals(GyroCellAction.ACTIVATE, parsed.cells.single().gyroAction)
+    }
+
+    @Test
+    fun `hostile gyro import is clamped`() {
+        val json = """
+            {
+              "id": "hostile-gyro",
+              "name": "Hostile Gyro",
+              "gyro": {
+                "enabled": true,
+                "activationMode": "TELEPORT",
+                "sensorSource": "MAGIC",
+                "sensitivityX": 999,
+                "sensitivityY": -5,
+                "deadzoneDps": -2,
+                "smoothing": 5,
+                "maxPixelsPerTick": 0,
+                "adsMultiplier": 9,
+                "biasX": 50,
+                "biasY": -50,
+                "regionXPct": 0.95,
+                "regionYPct": -1,
+                "regionWidthPct": 5,
+                "regionHeightPct": 0.001
+              },
+              "cells": [
+                {
+                  "id": "gy",
+                  "label": "GYRO",
+                  "type": "GYRO",
+                  "gyroAction": "NOPE"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val parsed = ProfileJson.parse(json)
+        val gyro = parsed.gyro
+        assertEquals(GyroActivationMode.HOLD, gyro.activationMode)
+        assertEquals(GyroSensorSource.FUSED, gyro.sensorSource)
+        assertEquals(GyroConfig.MAX_SENSITIVITY, gyro.sensitivityX, 0.0001f)
+        assertEquals(GyroConfig.MIN_SENSITIVITY, gyro.sensitivityY, 0.0001f)
+        assertEquals(0f, gyro.deadzoneDps, 0.0001f)
+        assertEquals(0.9f, gyro.smoothing, 0.0001f)
+        assertEquals(GyroConfig.MIN_PIXELS_PER_TICK, gyro.maxPixelsPerTick, 0.0001f)
+        assertEquals(GyroConfig.MAX_ADS_MULTIPLIER, gyro.adsMultiplier, 0.0001f)
+        assertEquals(GyroConfig.MAX_BIAS, gyro.biasX, 0.0001f)
+        assertEquals(-GyroConfig.MAX_BIAS, gyro.biasY, 0.0001f)
+        assertEquals(0.90f, gyro.regionXPct, 0.0001f)
+        assertEquals(0f, gyro.regionYPct, 0.0001f)
+        assertTrue(gyro.regionXPct + gyro.regionWidthPct <= 1.0001f)
+        assertTrue(gyro.regionYPct + gyro.regionHeightPct <= 1.0001f)
+        assertEquals(GyroCellAction.ACTIVATE, parsed.cells.single().gyroAction)
     }
 
     @Test

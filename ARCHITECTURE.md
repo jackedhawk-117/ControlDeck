@@ -4,10 +4,10 @@ A smartphone becomes a programmable wireless keyboard/mouse for PC games.
 Two applications, one versioned binary protocol. **No gamepad emulation.**
 
 > This document describes the target architecture. The living implementation
-> status is in [`docs/PLAN.md`](docs/PLAN.md); Milestones 1–5 implement the
+> status is in [`docs/PLAN.md`](docs/PLAN.md); Milestones 1–6 implement the
 > transport, pairing, input state machine, Linux/Windows backends, freeform
-> editor, profiles, macros and diagnostics. Gyroscope aiming is the remaining
-> planned extension.
+> editor, profiles, macros, diagnostics and gyro aiming. On-device gyro and
+> macro validation remain Milestone 7 work.
 
 ```
 ┌─────────────────────────── Android (Kotlin) ───────────────────────────┐
@@ -57,7 +57,7 @@ Crate / module map:
 |---|---|---|
 | D1 | **evdev keycodes as canonical key space** (u16, Linux `input-event-codes.h`) | Linux backend is zero-map; Windows backend holds one static evdev→scancode/VK table; phone and receiver share the same constants. No re-mapping per profile. |
 | D2 | **Event-based deltas + periodic full-state snapshots over UDP** | Low bandwidth and latency, while snapshots reconcile after packet loss. Receiver is idempotent (dedupe by held-state machine), so a lost event packet self-heals within ≤1 s (snapshot interval). |
-| D3 | **Phone is the single source of truth for sensitivity, acceleration, smoothing, and all scaling** | One sensitivity model; receiver applies deltas 1:1 (Q16.16 fixed point) with sub-pixel remainder accumulation. Receiver stays game-agnostic and profile-free. |
+| D3 | **Phone is the single source of truth for sensitivity, acceleration, smoothing, gyro mapping, and all scaling** | One sensitivity model; receiver applies deltas 1:1 (Q16.16 fixed point) with sub-pixel remainder accumulation. Receiver stays game-agnostic and profile-free. |
 | D4 | **Macros execute on the phone** | They become ordinary delta events; cancellable instantly (phone kills its own scheduler), receiver needs no macro logic, and no "cheat automation" capability is added on the PC side. |
 | D5 | **UDP for input + discovery, TCP for pairing/control** (ports 41000 both) | Per spec. Discovery rides the same UDP socket as input; one socket, one port to document/firewall. |
 | D6 | **PIN pairing → HKDF-SHA256 → AES-256-GCM session crypto with direction-tagged nonces** | Local networks are never trusted (spec §6). AES-256-GCM is natively accelerated on phones (Java `Cipher`) and PCs (AES-NI). Nonce = `dir(1B) ‖ counter(7B)` prevents reuse across directions; packet `seq` doubles as the nonce counter and AAD. No certificates/CA to manage. Documented limitation: HKDF+MAC-confirmation PIN scheme allows offline PIN brute-force from a recorded handshake (LAN-scoped risk; SPAKE2 is the upgrade path). |
@@ -106,7 +106,7 @@ on WLAN.
 | **Wayland input permissions** | uinput creates a kernel evdev device; Wayland compositors read it like any HID device. No compositor-specific API needed. The real gate is `/dev/uinput` write access. | `input` group membership or a udev rule (see `docs/linux-setup.md`); receiver preflights `/dev/uinput` and prints exact remediation. |
 | **Steam / Proton games** | SDL and raw-input stacks enumerate evdev devices; a uinput keyboard/mouse is indistinguishable from hardware. | Verified via SDL test harness readback (Milestone 7); no special-casing. |
 | **uinput unavailable / no permission** | Common on stock setups. | Explicit preflight + clear instructions; never silently fall back to X11 tools (would break Wayland). |
-| **Gyro → mouse correctness** | Naive accelerometer mapping is unusable. | TYPE_GYROSCOPE angular velocity, rotated into the world frame by TYPE_ROTATION_VECTOR quaternion, integrated over dt → yaw/pitch mouse deltas; bias calibration at rest; recenter; deadzone/smoothing; ADS sensitivity profile. Roll→X/wheel optional (off by default). No raw sensor data crosses the wire — only final deltas (protocol stays lean). |
+| **Gyro → mouse correctness** | Naive accelerometer mapping is unusable. | Default FUSED path derives yaw/pitch from the world-space screen-normal heading/elevation (roll ignored, drift-free); optional raw-gyro path integrates calibrated world-frame angular velocity using sensor timestamps. Bias auto-calibration while disarmed plus explicit 1 s calibration; recenter; deadzone/smoothing; ADS multiplier. No raw sensor data crosses the wire — only final deltas (protocol stays lean). |
 | **Packet loss / reorder on Wi-Fi** | UDP is lossy by design. | Event deltas + 1 Hz snapshots + idempotent state machine; sequence numbers; receiver drops stale seq but never releases held keys on a single loss (only on real disconnect conditions). |
 | **Windows anti-cheat / elevated apps** | `SendInput` cannot inject into elevated processes from a non-elevated receiver; some anti-cheats flag synthetic input. | Documented in `docs/windows-setup.md` (run receiver elevated for elevated games; no anti-cheat bypass is implemented, by charter). |
 | **Broadcast discovery blocked (AP isolation)** | Guest/IoT VLANs commonly block broadcast. | Manual IP entry is first-class in the UI; mDNS advertisement is a tracked follow-up. |
@@ -121,10 +121,13 @@ on WLAN.
   one watchdog task (timeout sweep), one STATS emitter. Shared state: session
   registry behind a `RwLock`, input bus via bounded channels (backpressure =
   drop-oldest delta batch, never block the network task).
-- **Android:** coroutines on `Dispatchers.IO` for network; `Dispatchers.Default`
-  for sensor/gyro math; UI on main. Input tick loop is a single coroutine with a
-  fixed 8.33 ms period; sensor events land in a lock-free `FloatArray` mailbox.
-  No allocations in the per-frame path (pre-allocated encode buffers).
+- **Android:** coroutines on `Dispatchers.IO` for network; UI and input mapping
+  on main. Sensor callbacks run on a dedicated `HandlerThread` and publish into
+  a small locked `FloatArray` mailbox. Input tick loop is a single coroutine
+  with a fixed 8.33 ms period; the gyro mapper is fed from that loop and only
+  writes Q16.16 deltas into the shared `MotionAccumulator`. Orientation math
+  uses pre-allocated normal/rate arrays; the only per-sample allocation is the
+  small two-int `Motion` result (encode buffers are pooled).
 
 ## 6. Smallest end-to-end prototype (Milestone 2)
 

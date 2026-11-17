@@ -1,6 +1,8 @@
 package com.phonecontroller.app.profile
 
 import com.phonecontroller.app.input.ControlAction
+import com.phonecontroller.app.input.GyroCellAction
+import com.phonecontroller.app.input.GyroConfig
 import com.phonecontroller.app.input.TouchpadConfig
 import java.util.UUID
 
@@ -11,6 +13,7 @@ enum class CellType {
     TOUCHPAD,
     JOYSTICK,
     MACRO,
+    GYRO,
     EMPTY,
 }
 
@@ -139,6 +142,8 @@ data class CellConfig(
     val joystickSprint: Boolean = true,
     /** Macro only: phone-side sequence executed on tap. */
     val macro: MacroConfig = MacroConfig(),
+    /** Gyro only: arm gyro aiming or reset the neutral pose. */
+    val gyroAction: GyroCellAction = GyroCellAction.ACTIVATE,
     val customColor: Long? = null,
     // Freeform canvas coordinates (0.0 .. 1.0 fraction of screen) and dimensions
     val xPct: Float = 0f,
@@ -153,7 +158,8 @@ data class CellConfig(
         if (type == CellType.EMPTY ||
             type == CellType.TOUCHPAD ||
             type == CellType.JOYSTICK ||
-            type == CellType.MACRO
+            type == CellType.MACRO ||
+            type == CellType.GYRO
         ) {
             return null
         }
@@ -171,6 +177,7 @@ data class GameProfile(
     val cols: Int = 4,
     val cells: List<CellConfig> = emptyList(),
     val touchpad: TouchpadConfig = TouchpadConfig(),
+    val gyro: GyroConfig = GyroConfig(),
     val buttonSpacingDp: Int = 8,
     val cornerRadiusDp: Int = 18,
     val opacity: Float = 1.0f,

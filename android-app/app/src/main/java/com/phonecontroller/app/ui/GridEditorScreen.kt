@@ -137,6 +137,17 @@ fun GridEditorScreen(
                 shape = ButtonShape.ROUNDED_RECT,
                 opacity = 0.65f,
             )
+            CellType.GYRO -> CellConfig(
+                id = UUID.randomUUID().toString(),
+                label = "GYRO",
+                type = CellType.GYRO,
+                xPct = 0.50f,
+                yPct = 0.40f,
+                widthDp = 64,
+                heightDp = 48,
+                shape = ButtonShape.PILL,
+                opacity = 0.85f,
+            )
             else -> CellConfig(
                 id = UUID.randomUUID().toString(),
                 label = "KEY",
@@ -364,6 +375,13 @@ fun GridEditorScreen(
                         modifier = Modifier.height(30.dp),
                     ) {
                         Text("+ Touchpad", fontSize = 11.sp)
+                    }
+                    OutlinedButton(
+                        onClick = { addNewControl(CellType.GYRO) },
+                        contentPadding = ButtonDefaults.TextButtonContentPadding,
+                        modifier = Modifier.height(30.dp),
+                    ) {
+                        Text("+ Gyro", fontSize = 11.sp)
                     }
                     OutlinedButton(
                         onClick = ::undo,

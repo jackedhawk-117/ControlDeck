@@ -1,5 +1,9 @@
 package com.phonecontroller.app.profile
 
+import com.phonecontroller.app.input.GyroActivationMode
+import com.phonecontroller.app.input.GyroCellAction
+import com.phonecontroller.app.input.GyroConfig
+import com.phonecontroller.app.input.GyroSensorSource
 import com.phonecontroller.app.input.TouchpadConfig
 import java.util.UUID
 
@@ -91,6 +95,32 @@ object ProfileJson {
         sb.append(pad4).append("\"tapToClick\": ").append(p.touchpad.tapToClick).append("\n")
         sb.append(pad2).append("},\n")
 
+        // Gyro aiming (additive optional object; absent means disabled default)
+        val g = p.gyro
+        sb.append(pad2).append("\"gyro\": {\n")
+        sb.append(pad4).append("\"enabled\": ").append(g.enabled).append(",\n")
+        sb.append(pad4).append("\"activationMode\": \"").append(g.activationMode.name).append("\",\n")
+        sb.append(pad4).append("\"sensorSource\": \"").append(g.sensorSource.name).append("\",\n")
+        sb.append(pad4).append("\"sensitivityX\": ").append(g.sensitivityX).append(",\n")
+        sb.append(pad4).append("\"sensitivityY\": ").append(g.sensitivityY).append(",\n")
+        sb.append(pad4).append("\"invertX\": ").append(g.invertX).append(",\n")
+        sb.append(pad4).append("\"invertY\": ").append(g.invertY).append(",\n")
+        sb.append(pad4).append("\"enableYaw\": ").append(g.enableYaw).append(",\n")
+        sb.append(pad4).append("\"enablePitch\": ").append(g.enablePitch).append(",\n")
+        sb.append(pad4).append("\"deadzoneDps\": ").append(g.deadzoneDps).append(",\n")
+        sb.append(pad4).append("\"smoothing\": ").append(g.smoothing).append(",\n")
+        sb.append(pad4).append("\"maxPixelsPerTick\": ").append(g.maxPixelsPerTick).append(",\n")
+        sb.append(pad4).append("\"adsMultiplier\": ").append(g.adsMultiplier).append(",\n")
+        sb.append(pad4).append("\"recenterOnRelease\": ").append(g.recenterOnRelease).append(",\n")
+        sb.append(pad4).append("\"biasX\": ").append(g.biasX).append(",\n")
+        sb.append(pad4).append("\"biasY\": ").append(g.biasY).append(",\n")
+        sb.append(pad4).append("\"biasZ\": ").append(g.biasZ).append(",\n")
+        sb.append(pad4).append("\"regionXPct\": ").append(g.regionXPct).append(",\n")
+        sb.append(pad4).append("\"regionYPct\": ").append(g.regionYPct).append(",\n")
+        sb.append(pad4).append("\"regionWidthPct\": ").append(g.regionWidthPct).append(",\n")
+        sb.append(pad4).append("\"regionHeightPct\": ").append(g.regionHeightPct).append("\n")
+        sb.append(pad2).append("},\n")
+
         // Cells
         sb.append(pad2).append("\"cells\": [\n")
         p.cells.forEachIndexed { i, c ->
@@ -106,6 +136,7 @@ object ProfileJson {
             sb.append(pad4).append("  \"mouseButtons\": [").append(c.mouseButtons.joinToString(", ")).append("],\n")
             sb.append(pad4).append("  \"isToggle\": ").append(c.isToggle).append(",\n")
             sb.append(pad4).append("  \"joystickSprint\": ").append(c.joystickSprint).append(",\n")
+            sb.append(pad4).append("  \"gyroAction\": \"").append(c.gyroAction.name).append("\",\n")
             if (c.macro.steps.isNotEmpty()) {
                 sb.append(pad4).append("  \"macro\": {\"repeatCount\": ")
                     .append(c.macro.repeatCount).append(", \"steps\": [")
@@ -199,6 +230,41 @@ object ProfileJson {
             TouchpadConfig()
         }
 
+        val gyroObj = map["gyro"]?.asObject()
+        val gyro = if (gyroObj != null) {
+            GyroConfig(
+                enabled = gyroObj["enabled"]?.asBoolean(false) ?: false,
+                activationMode = enumOrDefault(
+                    gyroObj["activationMode"]?.asString(),
+                    GyroActivationMode.HOLD,
+                ),
+                sensorSource = enumOrDefault(
+                    gyroObj["sensorSource"]?.asString(),
+                    GyroSensorSource.FUSED,
+                ),
+                sensitivityX = gyroObj["sensitivityX"]?.asFloat(3.0f) ?: 3.0f,
+                sensitivityY = gyroObj["sensitivityY"]?.asFloat(3.0f) ?: 3.0f,
+                invertX = gyroObj["invertX"]?.asBoolean(false) ?: false,
+                invertY = gyroObj["invertY"]?.asBoolean(false) ?: false,
+                enableYaw = gyroObj["enableYaw"]?.asBoolean(true) ?: true,
+                enablePitch = gyroObj["enablePitch"]?.asBoolean(true) ?: true,
+                deadzoneDps = gyroObj["deadzoneDps"]?.asFloat(1.0f) ?: 1.0f,
+                smoothing = gyroObj["smoothing"]?.asFloat(0.20f) ?: 0.20f,
+                maxPixelsPerTick = gyroObj["maxPixelsPerTick"]?.asFloat(200f) ?: 200f,
+                adsMultiplier = gyroObj["adsMultiplier"]?.asFloat(0.65f) ?: 0.65f,
+                recenterOnRelease = gyroObj["recenterOnRelease"]?.asBoolean(true) ?: true,
+                biasX = gyroObj["biasX"]?.asFloat(0f) ?: 0f,
+                biasY = gyroObj["biasY"]?.asFloat(0f) ?: 0f,
+                biasZ = gyroObj["biasZ"]?.asFloat(0f) ?: 0f,
+                regionXPct = gyroObj["regionXPct"]?.asFloat(0.30f) ?: 0.30f,
+                regionYPct = gyroObj["regionYPct"]?.asFloat(0.30f) ?: 0.30f,
+                regionWidthPct = gyroObj["regionWidthPct"]?.asFloat(0.40f) ?: 0.40f,
+                regionHeightPct = gyroObj["regionHeightPct"]?.asFloat(0.40f) ?: 0.40f,
+            ).sanitized()
+        } else {
+            GyroConfig()
+        }
+
         val usedCellIds = HashSet<String>()
         val cells = map["cells"]?.asArray()?.take(MAX_CELLS)?.mapNotNull { item ->
             val cMap = item.asObject() ?: return@mapNotNull null
@@ -269,6 +335,10 @@ object ProfileJson {
                     ?: emptyList(),
                 isToggle = cMap["isToggle"]?.asBoolean(false) ?: false,
                 joystickSprint = cMap["joystickSprint"]?.asBoolean(true) ?: true,
+                gyroAction = enumOrDefault(
+                    cMap["gyroAction"]?.asString(),
+                    GyroCellAction.ACTIVATE,
+                ),
                 macro = macro,
                 customColor = (cMap["customColor"] as? JsonValue.NumberVal)?.value
                     ?.takeIf { it.isFinite() && it >= 0.0 && it <= 0xFFFF_FFFFL.toDouble() }
@@ -294,6 +364,7 @@ object ProfileJson {
             cols = cols,
             cells = cells,
             touchpad = touchpad,
+            gyro = gyro,
             buttonSpacingDp = spacing,
             cornerRadiusDp = corner,
             opacity = opacity,
@@ -302,6 +373,10 @@ object ProfileJson {
 
     private fun finiteOrDefault(value: Float, default: Float): Float =
         if (value.isFinite()) value else default
+
+    /** Parse an enum name defensively; imports may be hand-edited. */
+    private inline fun <reified T : Enum<T>> enumOrDefault(raw: String?, default: T): T =
+        if (raw == null) default else runCatching { enumValueOf<T>(raw) }.getOrDefault(default)
 
     private fun sanitizeId(raw: String?, fallback: () -> String): String {
         val trimmed = raw?.trim().orEmpty()

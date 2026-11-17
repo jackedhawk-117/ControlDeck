@@ -44,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.phonecontroller.app.input.GyroCellAction
 import com.phonecontroller.app.input.Keycodes
 import com.phonecontroller.app.net.Protocol
 import com.phonecontroller.app.profile.ButtonShape
@@ -75,6 +76,7 @@ fun CellEditorDialog(
     var label by remember { mutableStateOf(cell.label) }
     var isToggle by remember { mutableStateOf(cell.isToggle) }
     var joystickSprint by remember { mutableStateOf(cell.joystickSprint) }
+    var gyroAction by remember { mutableStateOf(cell.gyroAction) }
     var macroConfig by remember { mutableStateOf(cell.macro) }
     var showMacroEditor by remember { mutableStateOf(false) }
     var selectedKeys by remember { mutableStateOf(cell.keys) }
@@ -124,7 +126,7 @@ fun CellEditorDialog(
                     )
                 }
 
-                // Control Type Tabs (two rows so six types stay readable)
+                // Control type tabs (three per row so all types stay readable)
                 val types = listOf(
                     CellType.KEY to "Key",
                     CellType.KEY_COMBO to "Combo",
@@ -132,6 +134,7 @@ fun CellEditorDialog(
                     CellType.JOYSTICK to "Joystick",
                     CellType.TOUCHPAD to "Touchpad",
                     CellType.MACRO to "Macro",
+                    CellType.GYRO to "Gyro",
                 )
                 for (row in types.chunked(3)) {
                     Row(
@@ -151,7 +154,7 @@ fun CellEditorDialog(
                                     .clickable {
                                         selectedType = t
                                         val defaultLabel = label.isBlank() ||
-                                            label in setOf("JOYSTICK", "TOUCHPAD", "MACRO")
+                                            label in setOf("JOYSTICK", "TOUCHPAD", "MACRO", "GYRO", "CENTER")
                                         when (t) {
                                             CellType.KEY -> {
                                                 if (selectedKeys.isEmpty()) selectedKeys = listOf(Keycodes.KEY_W)
@@ -182,6 +185,16 @@ fun CellEditorDialog(
                                                 selectedShape = ButtonShape.ROUNDED_RECT
                                                 widthDp = 96
                                                 heightDp = 58
+                                            }
+                                            CellType.GYRO -> {
+                                                label = if (gyroAction == GyroCellAction.RECENTER) {
+                                                    "CENTER"
+                                                } else {
+                                                    "GYRO"
+                                                }
+                                                selectedShape = ButtonShape.PILL
+                                                widthDp = 64
+                                                heightDp = 48
                                             }
                                             else -> {}
                                         }
@@ -569,6 +582,83 @@ fun CellEditorDialog(
                         }
                     }
 
+                    CellType.GYRO -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                "🎯 Gyro aiming control",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                "Arm or latch motion aiming, or store the current phone "
+                                    + "pose as neutral. Activation mode, sensitivity, "
+                                    + "deadzone, smoothing and calibration live in the "
+                                    + "Gyro settings screen.",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                val actions = listOf(
+                                    GyroCellAction.ACTIVATE to ("Arm gyro" to "Hold or toggle"),
+                                    GyroCellAction.RECENTER to ("Recenter" to "Reset neutral"),
+                                )
+                                for ((action, texts) in actions) {
+                                    val activeAction = gyroAction == action
+                                    Column(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .background(
+                                                if (activeAction) MaterialTheme.colorScheme.primaryContainer
+                                                else MaterialTheme.colorScheme.surface,
+                                                RoundedCornerShape(8.dp),
+                                            )
+                                            .clickable {
+                                                gyroAction = action
+                                                if (label.isBlank() ||
+                                                    label == "GYRO" ||
+                                                    label == "CENTER"
+                                                ) {
+                                                    label = if (action == GyroCellAction.RECENTER) {
+                                                        "CENTER"
+                                                    } else {
+                                                        "GYRO"
+                                                    }
+                                                }
+                                            }
+                                            .padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                                    ) {
+                                        Text(
+                                            texts.first,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            color = if (activeAction) {
+                                                MaterialTheme.colorScheme.onPrimaryContainer
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface
+                                            },
+                                        )
+                                        Text(
+                                            texts.second,
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     CellType.TOUCHPAD -> {
                         Column(
                             modifier = Modifier
@@ -620,6 +710,12 @@ fun CellEditorDialog(
                                     }
                                     CellType.JOYSTICK -> "WASD"
                                     CellType.TOUCHPAD -> "TOUCHPAD"
+                                    CellType.MACRO -> "MACRO"
+                                    CellType.GYRO -> if (gyroAction == GyroCellAction.RECENTER) {
+                                        "CENTER"
+                                    } else {
+                                        "GYRO"
+                                    }
                                     else -> ""
                                 }
                             } else {
@@ -632,8 +728,9 @@ fun CellEditorDialog(
                                     label = cleanLabel,
                                     keys = if (selectedType == CellType.KEY || selectedType == CellType.KEY_COMBO) selectedKeys else emptyList(),
                                     mouseButtons = if (selectedType == CellType.MOUSE_BUTTON) selectedMouseButtons else emptyList(),
-                                    isToggle = isToggle,
+                                    isToggle = if (selectedType == CellType.GYRO) false else isToggle,
                                     joystickSprint = joystickSprint,
+                                    gyroAction = gyroAction,
                                     macro = macroConfig.sanitized(),
                                     shape = selectedShape,
                                     widthDp = widthDp,

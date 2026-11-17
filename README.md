@@ -13,10 +13,10 @@ aiming. Works with Windows games, native Linux games, and Steam/Proton titles.
 
 ## Status
 
-Milestones 1–5 are implemented. Milestones 1–4 are device-validated; the
-Milestone 5 macro/UI path is JVM-tested and awaits on-device validation.
-Milestone 6 (gyroscope aiming) is next. See [`docs/PLAN.md`](docs/PLAN.md) for
-the living checklist.
+Milestones 1–6 are implemented. Milestones 1–4 are device-validated; the
+Milestone 5 macro/UI path and Milestone 6 gyro aiming are JVM-tested and await
+on-device validation. See [`docs/PLAN.md`](docs/PLAN.md) for the living
+checklist.
 
 Working today:
 
@@ -32,6 +32,20 @@ Working today:
   smoothing, acceleration, sensitivity X/Y, axis inversion, tap-to-click),
   120 Hz `MotionAccumulator` drain loop, adjustable width fraction, settings
   panel with live-update sliders persisted per profile.
+- **Gyro aiming** with console-style hybrid control: FUSED (drift-free
+  rotation-vector) or optional raw-gyro source, quaternion world-frame
+  yaw/pitch from the screen normal (roll ignored), per-axis sensitivity,
+  deadzone, motion-preserving smoothing, inversion, per-tick spike clamp,
+  ADS/RMB multiplier, runtime bias calibration with persisted per-profile bias,
+  dedicated recenter cell, and automatic re-prime on activation. Activation
+  modes: Always, Hold, Toggle, and an on-canvas touch region observed without
+  consuming touches. Gyro and touchpad deltas sum into the same mouse
+  accumulator, so fine aim and large camera swipes work simultaneously.
+- **Gyro tuning screen** with live sensor rates/availability, activation/source
+  chips, all response sliders, region controls, calibration status and
+  recenter/reset actions; diagnostics shows armed/aiming state and sensor
+  frequencies. GYRO cells are editable in the cell editor and addable from the
+  grid editor; the bundled FPS profile includes GYRO + CENTER cells.
 - Freeform customizable touchscreen canvas: normalized `xPct`/`yPct`
   positioning, independent cell assignment (keys, arbitrary key combos up to
   four keys, mouse buttons, toggles), custom labels, shapes, dimensions,
@@ -72,12 +86,13 @@ Working today:
 - Linux uinput backend (validated), Windows SendInput backend (compiled,
   runtime validation pending a Windows machine).
 - Kotlin↔Rust compatibility tests pinned to the Rust implementation, including
-  a real Kotlin-client ↔ real-Rust-receiver E2E test. Current suites: 96 Android
+  a real Kotlin-client ↔ real-Rust-receiver E2E test. Current suites: 124 Android
   JVM tests and 56 Rust tests, clippy clean.
 
-Not implemented yet: gyroscope aiming. The protocol and architecture are
-designed for it; see [`ARCHITECTURE.md`](ARCHITECTURE.md) and
-[`docs/GYRO-AIMING.md`](docs/GYRO-AIMING.md).
+Not yet validated on hardware: gyro sensor rates/drift/in-game feel, on-device
+macro execution, Windows runtime, and long sessions. The design and
+implementation reference is [`docs/GYRO-AIMING.md`](docs/GYRO-AIMING.md); the
+milestone report is [`docs/MILESTONE-6.md`](docs/MILESTONE-6.md).
 
 ## Quick start (Linux receiver)
 
@@ -180,10 +195,11 @@ the receiver binary or uinput is unavailable.
 | [`docs/MILESTONE-3.md`](docs/MILESTONE-3.md) | M3 report: touchpad camera, all mouse buttons, key combos, toggles, unit tests |
 | [`docs/MILESTONE-4.md`](docs/MILESTONE-4.md) | M4 report: customizable grid editor, profiles JSON, presets, receiver RESET |
 | [`docs/MILESTONE-5.md`](docs/MILESTONE-5.md) | M5 report: macros, macro editor, safety limits, diagnostics HUD |
+| [`docs/MILESTONE-6.md`](docs/MILESTONE-6.md) | M6 report: gyro sensors, mapping, calibration, activation modes, tests |
 | [`docs/linux-setup.md`](docs/linux-setup.md) | uinput permissions, Wayland/X11, Proton notes |
 | [`docs/windows-setup.md`](docs/windows-setup.md) | Windows build, SendInput limits, validation checklist |
 | [`docs/HOTSPOT.md`](docs/HOTSPOT.md) | PC on the phone's Wi-Fi hotspot: setup, discovery routing, firewall, troubleshooting |
-| [`docs/GYRO-AIMING.md`](docs/GYRO-AIMING.md) | gyro → mouse design (Milestone 6) |
+| [`docs/GYRO-AIMING.md`](docs/GYRO-AIMING.md) | gyro → mouse implementation reference (math, modes, calibration, tests) |
 
 Security note: the current PIN scheme derives the session key from the PIN and
 both handshake nonces. A recorded handshake allows an offline PIN guess

@@ -174,6 +174,12 @@ receiver keeps the sub-pixel remainder and emits integer evdev REL events; the
 phone performs all sensitivity/accel/smoothing so slow gyro aim does not
 truncate to zero.
 
+**Gyro aiming is not a wire concept either.** All sensor ingestion, quaternion
+math, calibration, deadzone/smoothing and sensitivity scaling happen on the
+phone; gyro output is ordinary `MOUSE_REL` Q16.16 data summed with touchpad
+deltas in the same accumulator. The receiver cannot tell which source produced a
+delta, and no sensor samples or gyro configuration are transmitted.
+
 **Macros are not a wire concept.** The phone validates and expands a macro into
 the same `KEY_DOWN`/`KEY_UP` events as touch controls (with reverse-order
 releases) and sends them through the normal ordered UDP FIFO. The receiver has

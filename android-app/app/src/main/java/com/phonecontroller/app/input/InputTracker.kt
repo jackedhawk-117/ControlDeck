@@ -113,6 +113,9 @@ class InputTracker {
         return bits
     }
 
+    /** True when [button] (1 = left, 2 = right, …) is currently held. */
+    fun isMouseButtonHeld(button: Int): Boolean = (buttonCounts[button] ?: 0) > 0
+
     /** True when no key or mouse button remains held. */
     fun isEmpty(): Boolean = keyCounts.isEmpty() && buttonCounts.isEmpty()
 
