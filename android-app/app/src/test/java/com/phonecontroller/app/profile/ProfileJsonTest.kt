@@ -369,4 +369,116 @@ class ProfileJsonTest {
         assertTrue(normalized[1].xPct > normalized[0].xPct)
         assertTrue(normalized[1].yPct > normalized[0].yPct)
     }
+
+    @Test
+    fun `macro cell roundtrip preserves steps and repeat count`() {
+        val original = GameProfile(
+            id = "macro-profile",
+            name = "Macro Test",
+            cells = listOf(
+                CellConfig(
+                    id = "macro-cell",
+                    label = "SHIFT-CLICK",
+                    type = CellType.MACRO,
+                    macro = MacroConfig(
+                        steps = listOf(
+                            MacroStep(
+                                MacroStepType.HOLD,
+                                listOf(Keycodes.KEY_LEFTSHIFT),
+                                delayMs = 20,
+                            ),
+                            MacroStep(
+                                MacroStepType.TAP,
+                                listOf(Keycodes.KEY_W),
+                                holdMs = 80,
+                                delayMs = 30,
+                            ),
+                            MacroStep(
+                                MacroStepType.RELEASE,
+                                listOf(Keycodes.KEY_LEFTSHIFT),
+                                delayMs = 10,
+                            ),
+                            MacroStep(MacroStepType.WAIT, delayMs = 250),
+                        ),
+                        repeatCount = 2,
+                    ),
+                    xPct = 0.5f,
+                    yPct = 0.5f,
+                ),
+            ),
+        )
+
+        val parsed = ProfileJson.parse(ProfileJson.serialize(original))
+        val cell = parsed.cells.single()
+        assertEquals(CellType.MACRO, cell.type)
+        assertEquals(2, cell.macro.repeatCount)
+        assertEquals(4, cell.macro.steps.size)
+        assertEquals(MacroStepType.HOLD, cell.macro.steps[0].type)
+        assertEquals(listOf(Keycodes.KEY_LEFTSHIFT), cell.macro.steps[0].keys)
+        assertEquals(MacroStepType.TAP, cell.macro.steps[1].type)
+        assertEquals(80, cell.macro.steps[1].holdMs)
+        assertEquals(MacroStepType.RELEASE, cell.macro.steps[2].type)
+        assertEquals(MacroStepType.WAIT, cell.macro.steps[3].type)
+        assertTrue(cell.macro.steps[3].keys.isEmpty())
+    }
+
+    @Test
+    fun `legacy macro cell without macro object decodes empty`() {
+        val json = """
+            {
+              "name": "Legacy Macro",
+              "cells": [
+                {
+                  "id": "m1",
+                  "label": "MACRO",
+                  "type": "MACRO",
+                  "keys": [],
+                  "mouseButtons": [],
+                  "xPct": 0.4,
+                  "yPct": 0.4
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val parsed = ProfileJson.parse(json)
+        val cell = parsed.cells.single()
+        assertEquals(CellType.MACRO, cell.type)
+        assertEquals(1, cell.macro.repeatCount)
+        assertTrue(cell.macro.steps.isEmpty())
+    }
+
+    @Test
+    fun `hostile macro import is clamped`() {
+        val steps = (0 until 40).joinToString(",") {
+            """{"type":"TAP","keys":[9999,${Keycodes.KEY_W}],"holdMs":99999,"delayMs":-5}"""
+        }
+        val json = """
+            {
+              "name": "Hostile Macro",
+              "cells": [
+                {
+                  "id": "m1",
+                  "label": "MACRO",
+                  "type": "MACRO",
+                  "keys": [],
+                  "mouseButtons": [],
+                  "macro": {
+                    "repeatCount": 999,
+                    "steps": [$steps]
+                  }
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val macro = ProfileJson.parse(json).cells.single().macro
+        assertTrue(macro.steps.size <= MacroLimits.MAX_STEPS)
+        assertEquals(1, macro.steps.first().keys.size)
+        assertEquals(Keycodes.KEY_W, macro.steps.first().keys.first())
+        assertEquals(MacroLimits.MAX_HOLD_MS, macro.steps.first().holdMs)
+        assertEquals(0, macro.steps.first().delayMs)
+        assertTrue(macro.repeatCount <= MacroLimits.MAX_REPEAT)
+        assertTrue(macro.estimatedDurationMs <= MacroLimits.MAX_DURATION_MS)
+    }
 }

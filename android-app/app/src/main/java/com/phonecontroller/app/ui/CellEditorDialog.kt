@@ -49,6 +49,7 @@ import com.phonecontroller.app.net.Protocol
 import com.phonecontroller.app.profile.ButtonShape
 import com.phonecontroller.app.profile.CellConfig
 import com.phonecontroller.app.profile.CellType
+import com.phonecontroller.app.profile.MacroLimits
 import kotlin.math.roundToInt
 
 /**
@@ -74,6 +75,8 @@ fun CellEditorDialog(
     var label by remember { mutableStateOf(cell.label) }
     var isToggle by remember { mutableStateOf(cell.isToggle) }
     var joystickSprint by remember { mutableStateOf(cell.joystickSprint) }
+    var macroConfig by remember { mutableStateOf(cell.macro) }
+    var showMacroEditor by remember { mutableStateOf(false) }
     var selectedKeys by remember { mutableStateOf(cell.keys) }
     var selectedMouseButtons by remember { mutableStateOf(cell.mouseButtons) }
     var selectedShape by remember { mutableStateOf(cell.shape) }
@@ -121,68 +124,82 @@ fun CellEditorDialog(
                     )
                 }
 
-                // Control Type Tabs
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    val types = listOf(
-                        CellType.KEY to "Key",
-                        CellType.KEY_COMBO to "Combo",
-                        CellType.MOUSE_BUTTON to "Mouse",
-                        CellType.JOYSTICK to "Joystick",
-                        CellType.TOUCHPAD to "Touchpad",
-                    )
-                    for ((t, name) in types) {
-                        val active = selectedType == t
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .background(
-                                    if (active) MaterialTheme.colorScheme.primaryContainer
-                                    else MaterialTheme.colorScheme.surfaceVariant,
-                                    RoundedCornerShape(8.dp),
-                                )
-                                .clickable {
-                                    selectedType = t
-                                    when (t) {
-                                        CellType.KEY -> {
-                                            if (selectedKeys.isEmpty()) selectedKeys = listOf(Keycodes.KEY_W)
-                                            if (label.isBlank() || label == "JOYSTICK" || label == "TOUCHPAD") label = "W"
+                // Control Type Tabs (two rows so six types stay readable)
+                val types = listOf(
+                    CellType.KEY to "Key",
+                    CellType.KEY_COMBO to "Combo",
+                    CellType.MOUSE_BUTTON to "Mouse",
+                    CellType.JOYSTICK to "Joystick",
+                    CellType.TOUCHPAD to "Touchpad",
+                    CellType.MACRO to "Macro",
+                )
+                for (row in types.chunked(3)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        for ((t, name) in row) {
+                            val active = selectedType == t
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .background(
+                                        if (active) MaterialTheme.colorScheme.primaryContainer
+                                        else MaterialTheme.colorScheme.surfaceVariant,
+                                        RoundedCornerShape(8.dp),
+                                    )
+                                    .clickable {
+                                        selectedType = t
+                                        val defaultLabel = label.isBlank() ||
+                                            label in setOf("JOYSTICK", "TOUCHPAD", "MACRO")
+                                        when (t) {
+                                            CellType.KEY -> {
+                                                if (selectedKeys.isEmpty()) selectedKeys = listOf(Keycodes.KEY_W)
+                                                if (defaultLabel) label = "W"
+                                            }
+                                            CellType.KEY_COMBO -> {
+                                                if (selectedKeys.isEmpty()) selectedKeys = listOf(Keycodes.KEY_LEFTSHIFT, Keycodes.KEY_W)
+                                                if (defaultLabel) label = "SPRINT"
+                                            }
+                                            CellType.MOUSE_BUTTON -> {
+                                                if (selectedMouseButtons.isEmpty()) selectedMouseButtons = listOf(Protocol.MOUSE_LEFT)
+                                                if (defaultLabel) label = "LMB"
+                                            }
+                                            CellType.JOYSTICK -> {
+                                                label = "WASD"
+                                                selectedShape = ButtonShape.CIRCLE
+                                                widthDp = 130
+                                                heightDp = 130
+                                            }
+                                            CellType.TOUCHPAD -> {
+                                                label = "AIM TOUCHPAD"
+                                                selectedShape = ButtonShape.ROUNDED_RECT
+                                                widthDp = 200
+                                                heightDp = 160
+                                            }
+                                            CellType.MACRO -> {
+                                                label = "MACRO"
+                                                selectedShape = ButtonShape.ROUNDED_RECT
+                                                widthDp = 96
+                                                heightDp = 58
+                                            }
+                                            else -> {}
                                         }
-                                        CellType.KEY_COMBO -> {
-                                            if (selectedKeys.isEmpty()) selectedKeys = listOf(Keycodes.KEY_LEFTSHIFT, Keycodes.KEY_W)
-                                            if (label.isBlank() || label == "JOYSTICK" || label == "TOUCHPAD") label = "SPRINT"
-                                        }
-                                        CellType.MOUSE_BUTTON -> {
-                                            if (selectedMouseButtons.isEmpty()) selectedMouseButtons = listOf(Protocol.MOUSE_LEFT)
-                                            if (label.isBlank() || label == "JOYSTICK" || label == "TOUCHPAD") label = "LMB"
-                                        }
-                                        CellType.JOYSTICK -> {
-                                            label = "WASD"
-                                            selectedShape = ButtonShape.CIRCLE
-                                            widthDp = 130
-                                            heightDp = 130
-                                        }
-                                        CellType.TOUCHPAD -> {
-                                            label = "AIM TOUCHPAD"
-                                            selectedShape = ButtonShape.ROUNDED_RECT
-                                            widthDp = 200
-                                            heightDp = 160
-                                        }
-                                        else -> {}
                                     }
-                                }
-                                .padding(vertical = 7.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                name,
-                                fontSize = 11.sp,
-                                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                                color = if (active) MaterialTheme.colorScheme.onPrimaryContainer
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                                    .padding(vertical = 7.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    name,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (active) MaterialTheme.colorScheme.onPrimaryContainer
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        repeat(3 - row.size) {
+                            Spacer(Modifier.weight(1f))
                         }
                     }
                 }
@@ -514,6 +531,44 @@ fun CellEditorDialog(
                         }
                     }
 
+                    CellType.MACRO -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                "⚡ Phone-side Macro",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                "Runs a bounded sequence of keys on the phone. Steps can tap chords, hold and release keys, or wait; repeats are capped at ${MacroLimits.MAX_REPEAT}. Tap the macro button again to cancel it immediately.",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                if (macroConfig.steps.isEmpty()) {
+                                    "No steps yet."
+                                } else {
+                                    "${macroConfig.steps.size} steps · repeat ×${macroConfig.repeatCount} · ~${macroConfig.sanitized().estimatedDurationMs} ms"
+                                },
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Button(
+                                onClick = { showMacroEditor = true },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(if (macroConfig.steps.isEmpty()) "Create Macro…" else "Edit Macro…")
+                            }
+                        }
+                    }
+
                     CellType.TOUCHPAD -> {
                         Column(
                             modifier = Modifier
@@ -579,6 +634,7 @@ fun CellEditorDialog(
                                     mouseButtons = if (selectedType == CellType.MOUSE_BUTTON) selectedMouseButtons else emptyList(),
                                     isToggle = isToggle,
                                     joystickSprint = joystickSprint,
+                                    macro = macroConfig.sanitized(),
                                     shape = selectedShape,
                                     widthDp = widthDp,
                                     heightDp = heightDp,
@@ -591,6 +647,17 @@ fun CellEditorDialog(
                         Text("Save Control")
                     }
                 }
+            }
+
+            if (showMacroEditor) {
+                MacroEditorDialog(
+                    initial = macroConfig,
+                    onSave = {
+                        macroConfig = it.sanitized()
+                        showMacroEditor = false
+                    },
+                    onDismiss = { showMacroEditor = false },
+                )
             }
         }
     }
@@ -755,16 +822,17 @@ private fun KeyPickerSection(
 }
 
 @Composable
-private fun KeyComboSection(
+internal fun KeyComboSection(
     selectedKeys: List<Int>,
     onChange: (List<Int>) -> Unit,
+    description: String = "Keys held together (max ${MacroLimits.MAX_KEYS_PER_STEP}), released in reverse order:",
 ) {
     var comboSearch by remember { mutableStateOf("") }
     var comboCategory by remember { mutableStateOf("All") }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            "Keys held together (max 4), released in reverse order:",
+            description,
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -843,7 +911,7 @@ private fun KeyComboSection(
             selectedCategory = comboCategory,
             onCategoryChange = { comboCategory = it },
             onKeySelected = { key ->
-                if (key.code !in selectedKeys && selectedKeys.size < 4) {
+                if (key.code !in selectedKeys && selectedKeys.size < MacroLimits.MAX_KEYS_PER_STEP) {
                     onChange(selectedKeys + key.code)
                 }
             },

@@ -5,12 +5,13 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[b]` blocked (r
 This file is the living implementation checklist (Engineering Rule 12). Update
 status after every milestone or significant change.
 
-Current position: **Milestones 1–4 complete and hardened**, **Milestone 5 in
-progress** (joystick and toggle/hold done; macros and richer diagnostics
-remain). The APK has been installed and validated on a motorola edge 70 fusion
-(Android 17): discovery, PIN pairing, UDP keyboard/mouse input, touchpad camera,
-customizable freeform canvas editor, and per-profile switching with receiver
-RESET synchronization.
+Current position: **Milestones 1–5 implemented** (M1–M4 device-validated;
+M5 macro/UI validation is tracked in Milestone 7). Milestone 6 (gyroscope
+aiming) is next. The APK has been installed and validated on a motorola edge 70
+fusion (Android 17): discovery, PIN pairing, UDP keyboard/mouse input, touchpad
+camera, customizable freeform canvas editor, and per-profile switching with
+receiver RESET synchronization. Macros and the diagnostics HUD are implemented
+and covered by JVM tests; on-device macro execution is the next validation item.
 
 A second device session on 2026-11-16 re-verified fresh PIN pairing, Linux
 uinput delivery of mouse left/right/middle, all four joystick axes plus the
@@ -147,7 +148,7 @@ key combination ordering, snapshot reconciliation and watchdog release.
 defaults fallback, out-of-bounds dimension trimming, canvas coordinate distribution,
 hostile-import clamping and duplicate-id repair) and `ProfileModelTest` (in-place
 updates, stable order across repeated drags, unknown-id append). The Android suite
-now has 71 tests across 11 classes; all 56 Rust tests and clippy pass. APK builds and
+now has 77 tests across 12 classes; all 56 Rust tests and clippy pass. APK builds and
 installs cleanly on device (`ZA223M8MVQ`).
 
 ## Milestone 5 — Advanced controls
@@ -156,10 +157,21 @@ installs cleanly on device (`ZA223M8MVQ`).
 - [x] Per-joystick sprint enable/disable: editor switch, persisted as
       `joystickSprint` (legacy profiles default on), Shift suppressed when off;
       verified on device (W only vs W+Shift)
-- [ ] Macro system (sequences, chords, delays, repeats, safety caps, immediate cancel)
-- [ ] Macro editor with step/duration/rate limits
+- [x] Macro system (sequences, chords, delays, repeats, safety caps, immediate cancel)
+- [x] Macro editor with step/duration/rate limits
 - [x] Toggle and hold action wrappers
-- [~] Diagnostics HUD (loss, quality, event rate, active states) beyond the current RTT line
+- [x] Diagnostics HUD (loss, quality, event rate, active states) beyond the current RTT line
+
+**Acceptance met:** `MacroEngine` executes sanitized `MacroConfig` plans through
+`InputTracker`, so macro keys share reference counts with touch controls and are
+released by the same cancel/release-all paths. The editor supports Tap, Hold,
+Release and Wait steps, key chords, hold/delay timing, reordering and repeats,
+with hard limits (24 steps, ×10 repeats, 15 s total). JSON imports clamp hostile
+macros; the engine adds a runtime timeout as a second defence. The diagnostics
+HUD shows state, RTT, input rate, drop counters/rate, quality, held keys/mouse
+buttons and running macros. Android suite: **96 tests across 14 classes**, 0
+failures; lint 0 errors. On-device macro/UI validation remains (Milestone 7)
+because the phone was not attached during this pass.
 
 ## Milestone 6 — Gyroscope
 
@@ -186,6 +198,7 @@ installs cleanly on device (`ZA223M8MVQ`).
       app's scan (user-confirmed on-device, 2026-11-16)
 - [ ] Hotspot pairing/input latency capture and long-session soak
 - [ ] On-device profile switching and touchpad-settings persistence
+- [ ] On-device macro editor, step timing, cancel and evtest output verification
 - [ ] Android on-device multitouch chording, input-latency measurement, soak test
 - [ ] Network interruption / reconnection drills; no stuck inputs
 - [ ] Long-session soak test (≥2 h)
@@ -209,7 +222,8 @@ installs cleanly on device (`ZA223M8MVQ`).
 | Windows runtime validation | No Windows machine; `SendInput` backend compiles under `cfg(windows)` only | Milestone 7 |
 | QR-code pairing | PIN pairing is implemented; QR adds camera/permission complexity | M8 candidate |
 | mDNS/Avahi advertisement | UDP broadcast + manual IP cover normal and AP-isolated networks | M8 candidate |
-| Gyro/macros | Freeform profiles and the layout editor are implemented; gyro and macros remain design-documented | Milestones 5–6 |
+| Gyro | Freeform profiles, macros and the layout editor are implemented; gyro remains design-documented | Milestone 6 |
+| Macro device validation | Macro model/engine/editor and diagnostics are JVM-tested (96 tests); the phone was not attached for on-device evtest of macro output and the new editor UI | Milestone 7 |
 | SPAKE2 pairing | Current HKDF+HMAC PIN scheme allows offline PIN brute force from a recorded handshake; LAN-scoped threat model | Security upgrade path |
 | Compose BOM pinned to 2026.06.01 | Newer BOMs require compileSdk 37, while this environment has SDK 36 | Revisit when SDK 37 is installed |
 | Simulator cross-process TCP in sandbox | OS network sandbox blocks loopback between sandboxed processes; integration tests use in-process tokio server and pass | Dev environment only |

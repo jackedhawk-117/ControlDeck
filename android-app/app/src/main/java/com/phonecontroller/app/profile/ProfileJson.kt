@@ -106,6 +106,18 @@ object ProfileJson {
             sb.append(pad4).append("  \"mouseButtons\": [").append(c.mouseButtons.joinToString(", ")).append("],\n")
             sb.append(pad4).append("  \"isToggle\": ").append(c.isToggle).append(",\n")
             sb.append(pad4).append("  \"joystickSprint\": ").append(c.joystickSprint).append(",\n")
+            if (c.macro.steps.isNotEmpty()) {
+                sb.append(pad4).append("  \"macro\": {\"repeatCount\": ")
+                    .append(c.macro.repeatCount).append(", \"steps\": [")
+                c.macro.steps.forEachIndexed { index, step ->
+                    sb.append("{\"type\": \"").append(step.type.name)
+                        .append("\", \"keys\": [").append(step.keys.joinToString(", "))
+                        .append("], \"holdMs\": ").append(step.holdMs)
+                        .append(", \"delayMs\": ").append(step.delayMs).append("}")
+                    if (index < c.macro.steps.size - 1) sb.append(", ")
+                }
+                sb.append("]},\n")
+            }
             sb.append(pad4).append("  \"xPct\": ").append(c.xPct).append(",\n")
             sb.append(pad4).append("  \"yPct\": ").append(c.yPct).append(",\n")
             sb.append(pad4).append("  \"widthDp\": ").append(c.widthDp).append(",\n")
@@ -202,6 +214,39 @@ object ProfileJson {
                 cellId = UUID.randomUUID().toString()
             }
 
+            val macroObj = cMap["macro"]?.asObject()
+            val macro = if (macroObj != null) {
+                val steps = macroObj["steps"]?.asArray()
+                    ?.take(MacroLimits.MAX_STEPS)
+                    ?.mapNotNull { item ->
+                        val m = item.asObject() ?: return@mapNotNull null
+                        val type = runCatching {
+                            MacroStepType.valueOf(m["type"]?.asString() ?: "TAP")
+                        }.getOrDefault(MacroStepType.TAP)
+                        val keys = m["keys"]?.asArray()
+                            ?.map { it.asInt() }
+                            ?.filter { it in 1..MacroLimits.MAX_EVDEV_CODE }
+                            ?.distinct()
+                            ?.take(MacroLimits.MAX_KEYS_PER_STEP)
+                            ?: emptyList()
+                        MacroStep(
+                            type = type,
+                            keys = keys,
+                            holdMs = m["holdMs"]?.asInt(MacroLimits.DEFAULT_HOLD_MS)
+                                ?: MacroLimits.DEFAULT_HOLD_MS,
+                            delayMs = m["delayMs"]?.asInt(MacroLimits.DEFAULT_DELAY_MS)
+                                ?: MacroLimits.DEFAULT_DELAY_MS,
+                        )
+                    }
+                    ?: emptyList()
+                MacroConfig(
+                    steps = steps,
+                    repeatCount = macroObj["repeatCount"]?.asInt(1) ?: 1,
+                ).sanitized()
+            } else {
+                MacroConfig()
+            }
+
             CellConfig(
                 id = cellId,
                 row = (cMap["row"]?.asInt(0) ?: 0).coerceIn(0, 5),
@@ -224,6 +269,7 @@ object ProfileJson {
                     ?: emptyList(),
                 isToggle = cMap["isToggle"]?.asBoolean(false) ?: false,
                 joystickSprint = cMap["joystickSprint"]?.asBoolean(true) ?: true,
+                macro = macro,
                 customColor = (cMap["customColor"] as? JsonValue.NumberVal)?.value
                     ?.takeIf { it.isFinite() && it >= 0.0 && it <= 0xFFFF_FFFFL.toDouble() }
                     ?.toLong(),

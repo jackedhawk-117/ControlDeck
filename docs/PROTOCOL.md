@@ -174,6 +174,11 @@ receiver keeps the sub-pixel remainder and emits integer evdev REL events; the
 phone performs all sensitivity/accel/smoothing so slow gyro aim does not
 truncate to zero.
 
+**Macros are not a wire concept.** The phone validates and expands a macro into
+the same `KEY_DOWN`/`KEY_UP` events as touch controls (with reverse-order
+releases) and sends them through the normal ordered UDP FIFO. The receiver has
+no macro interpreter and cannot be asked to run stored automation.
+
 ### 5.6 INPUT_SNAPSHOT (encrypted UDP, phone→pc, every 1 s or after resync suspicion)
 
 ```

@@ -13,9 +13,10 @@ aiming. Works with Windows games, native Linux games, and Steam/Proton titles.
 
 ## Status
 
-Milestones 1–4 are complete and hardened; Milestone 5 (advanced controls) is in
-progress — joystick and toggle/hold are working, macros are next. See
-[`docs/PLAN.md`](docs/PLAN.md) for the living checklist.
+Milestones 1–5 are implemented. Milestones 1–4 are device-validated; the
+Milestone 5 macro/UI path is JVM-tested and awaits on-device validation.
+Milestone 6 (gyroscope aiming) is next. See [`docs/PLAN.md`](docs/PLAN.md) for
+the living checklist.
 
 Working today:
 
@@ -40,6 +41,16 @@ Working today:
   Shift chord for any joystick. The setting is stored as `joystickSprint` in the
   profile JSON (legacy profiles default to enabled) and suppresses the Shift
   key entirely when off.
+- **Phone-side macros**: arbitrary tap/hold/release/wait sequences with chords,
+  per-step hold and delay timing, and up to ten repeats. A dedicated editor
+  provides step reordering, key selection and live duration checks. Macros run
+  through the same `InputTracker` as touch controls, so reference counts,
+  snapshots, release-all and the ordered UDP FIFO all still apply. Tapping the
+  macro button again cancels it immediately; steps, repeats and total runtime
+  are hard-capped (24 steps, ×10, 15 s).
+- **Diagnostics HUD** in gameplay: connection state, RTT, receiver input rate,
+  cumulative/packet-drop rate, derived connection quality, currently held keys
+  and mouse buttons, and running macros.
 - Dedicated layout-editing mode (`GridEditorScreen`) vs. gameplay mode (`PlayScreen`),
   with cumulative drag positioning, in-session undo stack and reset-to-defaults.
 - Portable, versioned JSON profile format (`ProfileJson.kt`, schema v1) with full
@@ -61,11 +72,11 @@ Working today:
 - Linux uinput backend (validated), Windows SendInput backend (compiled,
   runtime validation pending a Windows machine).
 - Kotlin↔Rust compatibility tests pinned to the Rust implementation, including
-  a real Kotlin-client ↔ real-Rust-receiver E2E test. Current suites: 77 Android
+  a real Kotlin-client ↔ real-Rust-receiver E2E test. Current suites: 96 Android
   JVM tests and 56 Rust tests, clippy clean.
 
-Not implemented yet: macros, gyroscope. The protocol and architecture are
-designed for them; see [`ARCHITECTURE.md`](ARCHITECTURE.md) and
+Not implemented yet: gyroscope aiming. The protocol and architecture are
+designed for it; see [`ARCHITECTURE.md`](ARCHITECTURE.md) and
 [`docs/GYRO-AIMING.md`](docs/GYRO-AIMING.md).
 
 ## Quick start (Linux receiver)
@@ -168,6 +179,7 @@ the receiver binary or uinput is unavailable.
 | [`docs/MILESTONE-2.md`](docs/MILESTONE-2.md) | M2 report: communication, Android client, E2E results |
 | [`docs/MILESTONE-3.md`](docs/MILESTONE-3.md) | M3 report: touchpad camera, all mouse buttons, key combos, toggles, unit tests |
 | [`docs/MILESTONE-4.md`](docs/MILESTONE-4.md) | M4 report: customizable grid editor, profiles JSON, presets, receiver RESET |
+| [`docs/MILESTONE-5.md`](docs/MILESTONE-5.md) | M5 report: macros, macro editor, safety limits, diagnostics HUD |
 | [`docs/linux-setup.md`](docs/linux-setup.md) | uinput permissions, Wayland/X11, Proton notes |
 | [`docs/windows-setup.md`](docs/windows-setup.md) | Windows build, SendInput limits, validation checklist |
 | [`docs/HOTSPOT.md`](docs/HOTSPOT.md) | PC on the phone's Wi-Fi hotspot: setup, discovery routing, firewall, troubleshooting |

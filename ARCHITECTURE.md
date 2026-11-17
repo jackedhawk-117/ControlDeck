@@ -4,10 +4,10 @@ A smartphone becomes a programmable wireless keyboard/mouse for PC games.
 Two applications, one versioned binary protocol. **No gamepad emulation.**
 
 > This document describes the target architecture. The living implementation
-> status is in [`docs/PLAN.md`](docs/PLAN.md); Milestones 1–2 implement the
-> transport, pairing, input state machine, Linux/Windows backends and a fixed
-> starter grid. Touchpad, configurable grid, profiles, macros and gyro are
-> planned extensions, not shipped features yet.
+> status is in [`docs/PLAN.md`](docs/PLAN.md); Milestones 1–5 implement the
+> transport, pairing, input state machine, Linux/Windows backends, freeform
+> editor, profiles, macros and diagnostics. Gyroscope aiming is the remaining
+> planned extension.
 
 ```
 ┌─────────────────────────── Android (Kotlin) ───────────────────────────┐

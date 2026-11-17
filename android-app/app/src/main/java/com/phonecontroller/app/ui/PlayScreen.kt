@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,6 +34,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -51,6 +53,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,6 +61,7 @@ import com.phonecontroller.app.AppModel
 import com.phonecontroller.app.input.ControlAction
 import com.phonecontroller.app.input.InputTracker
 import com.phonecontroller.app.input.Keycodes
+import com.phonecontroller.app.input.MacroEngine
 import com.phonecontroller.app.input.Motion
 import com.phonecontroller.app.input.MotionAccumulator
 import com.phonecontroller.app.input.TouchpadConfig
@@ -66,6 +70,7 @@ import com.phonecontroller.app.net.ConnState
 import com.phonecontroller.app.net.DeltaEvent
 import com.phonecontroller.app.net.PhoneConnection
 import com.phonecontroller.app.net.Protocol
+import com.phonecontroller.app.net.Stats
 import com.phonecontroller.app.profile.ButtonShape
 import com.phonecontroller.app.profile.CellConfig
 import com.phonecontroller.app.profile.CellType
@@ -109,26 +114,51 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
     var isEditorMode by remember { mutableStateOf(false) }
     var showProfileManager by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showDiagnostics by remember { mutableStateOf(false) }
 
     val tracker = remember { InputTracker() }
     val motion = remember { MotionAccumulator() }
     var pressedIds by remember { mutableStateOf(setOf<String>()) }
     var toggledIds by remember { mutableStateOf(setOf<String>()) }
+    var runningMacros by remember { mutableStateOf(setOf<String>()) }
     var touchpadSaveJob by remember { mutableStateOf<Job?>(null) }
 
+    // Macros run on the Compose/UI dispatcher and feed the same tracker as
+    // touch controls. A dropped connection therefore cancels and releases them.
+    val macroEngine = remember(tracker, conn) {
+        MacroEngine(
+            tracker = tracker,
+            emit = { events ->
+                if (conn.state.value is ConnState.Paired) conn.enqueueDelta(events)
+            },
+            scope = model.scope,
+            onRunningChanged = { runningMacros = it },
+        )
+    }
+
     val released = state !is ConnState.Paired
+
+    // A macro job runs in the app scope, not the composition scope. Cancel it
+    // when the gameplay screen is disposed so it cannot keep running (and
+    // enqueueing to a closed connection) after Back/Disconnect.
+    DisposableEffect(macroEngine) {
+        onDispose { macroEngine.cancelAll() }
+    }
 
     // Safety: clear local highlights/state after disconnect/watchdog
     LaunchedEffect(released) {
         if (released) {
+            macroEngine.cancelAll()
             touchpadSaveJob?.cancel()
             tracker.clear()
             motion.clear()
             pressedIds = emptySet()
             toggledIds = emptySet()
+            runningMacros = emptySet()
             showSettings = false
             showProfileManager = false
             isEditorMode = false
+            showDiagnostics = false
         }
     }
 
@@ -171,11 +201,13 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
      * leaves keys held on the PC.
      */
     fun releaseAllInputs() {
+        macroEngine.cancelAll()
         val events = tracker.releaseAll()
         tracker.clear()
         motion.clear()
         pressedIds = emptySet()
         toggledIds = emptySet()
+        runningMacros = emptySet()
         if (conn.state.value is ConnState.Paired) {
             if (events.isNotEmpty()) conn.enqueueDelta(events)
             model.scope.launch { runCatching { conn.sendReset() } }
@@ -385,6 +417,28 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
                             )
                         }
 
+                        CellType.MACRO -> {
+                            val running = cell.id in runningMacros
+                            CanvasButton(
+                                label = cell.label,
+                                held = running,
+                                enabled = !released,
+                                shape = clipShape,
+                                opacity = cell.opacity,
+                                tint = cell.customColor,
+                                modifier = Modifier.fillMaxSize(),
+                                // Tap starts; tap while running cancels immediately.
+                                onDown = {
+                                    if (running) {
+                                        macroEngine.cancel(cell.id)
+                                    } else {
+                                        macroEngine.start(cell.id, cell.macro)
+                                    }
+                                },
+                                onUp = {},
+                            )
+                        }
+
                         else -> {
                             val action = cell.toControlAction()
                             if (action != null) {
@@ -475,6 +529,13 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
                         Text("Touchpad", fontSize = 11.sp)
                     }
                     OutlinedButton(
+                        onClick = { showDiagnostics = !showDiagnostics },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.height(28.dp),
+                    ) {
+                        Text(if (showDiagnostics) "Hide Stats" else "Stats", fontSize = 11.sp)
+                    }
+                    OutlinedButton(
                         onClick = { model.disconnect() },
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
@@ -485,12 +546,158 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
                 }
             }
         }
+
+        if (showDiagnostics) {
+            DiagnosticsPanel(
+                pcName = conn.pcName,
+                state = state,
+                stats = stats,
+                rttMs = conn.rttMs,
+                heldKeys = tracker.heldKeys(),
+                mouseBits = tracker.mouseBits(),
+                runningMacros = runningMacros.size,
+                onClose = { showDiagnostics = false },
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp),
+            )
+        }
     }
 }
 
 /**
- * High-precision swipe camera touchpad surface.
+ * Compact, always-visible-while-open diagnostics overlay. Values come from
+ * the receiver's 1 Hz STATS packets, the TCP RTT probe and local tracker state.
  */
+@Composable
+private fun DiagnosticsPanel(
+    pcName: String,
+    state: ConnState,
+    stats: Stats?,
+    rttMs: Int,
+    heldKeys: IntArray,
+    mouseBits: Int,
+    runningMacros: Int,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var lastDrops by remember { mutableStateOf<Long?>(null) }
+    var dropsPerSecond by remember { mutableStateOf(0L) }
+    LaunchedEffect(stats?.packetsDroppedTotal) {
+        val total = stats?.packetsDroppedTotal ?: return@LaunchedEffect
+        lastDrops?.let { previous ->
+            if (total >= previous) dropsPerSecond = total - previous
+        }
+        lastDrops = total
+        // Stats may stop changing when no drops occur; decay the rate instead
+        // of leaving a one-off spike displayed forever.
+        delay(1_500)
+        dropsPerSecond = 0
+    }
+
+    val connected = state is ConnState.Paired
+    val quality = when {
+        !connected -> "offline"
+        rttMs <= 0 -> "measuring"
+        rttMs > 100 || dropsPerSecond >= 5 -> "Poor"
+        rttMs > 40 || dropsPerSecond >= 1 -> "Fair"
+        else -> "Good"
+    }
+    val qualityColor = when (quality) {
+        "Good" -> Color(0xFF66BB6A)
+        "Fair" -> Color(0xFFFFB74D)
+        "Poor" -> Color(0xFFEF5350)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    val active = buildList {
+        for (key in heldKeys) add(Keycodes.labelFor(key))
+        if (mouseBits and 0x01 != 0) add("LMB")
+        if (mouseBits and 0x02 != 0) add("RMB")
+        if (mouseBits and 0x04 != 0) add("MMB")
+        if (mouseBits and 0x08 != 0) add("BACK")
+        if (mouseBits and 0x10 != 0) add("FWD")
+    }
+    val activeText = if (active.isEmpty()) "none" else active.joinToString(" + ")
+
+    Card(
+        modifier = modifier.widthIn(max = 290.dp),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Diagnostics",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                OutlinedButton(
+                    onClick = onClose,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    modifier = Modifier.height(22.dp),
+                ) {
+                    Text("✕", fontSize = 10.sp)
+                }
+            }
+            DiagRow("PC", pcName)
+            DiagRow(
+                "Status",
+                if (connected) {
+                    "paired"
+                } else {
+                    (state as? ConnState.Disconnected)?.reason ?: "disconnected"
+                },
+            )
+            DiagRow("Quality", quality, qualityColor)
+            DiagRow("RTT", if (rttMs > 0) "$rttMs ms" else "—")
+            DiagRow("Input rate", "${stats?.eventsPerSec ?: 0} ev/s")
+            DiagRow(
+                "Drops",
+                "${stats?.packetsDroppedTotal ?: 0} total" +
+                    if (dropsPerSecond > 0) " · +$dropsPerSecond/s" else "",
+            )
+            DiagRow("Active keys", activeText)
+            DiagRow("Macros", if (runningMacros > 0) "$runningMacros running" else "none")
+        }
+    }
+}
+
+@Composable
+private fun DiagRow(label: String, value: String, valueColor: Color? = null) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            value,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium,
+            color = valueColor ?: MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.End,
+            modifier = Modifier.weight(2f),
+        )
+    }
+}
 @Composable
 private fun CameraTouchpadSurface(
     enabled: Boolean,
