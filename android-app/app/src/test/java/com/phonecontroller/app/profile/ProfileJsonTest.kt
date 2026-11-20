@@ -268,10 +268,34 @@ class ProfileJsonTest {
             """{"id":"legacy-gyro","name":"Legacy","cells":[{"id":"gy","label":"GYRO","type":"GYRO"}]}""",
         )
         assertFalse(parsed.gyro.enabled)
-        assertEquals(GyroActivationMode.HOLD, parsed.gyro.activationMode)
+        assertEquals(GyroActivationMode.ALWAYS, parsed.gyro.activationMode)
+        assertEquals(GyroActivationMode.ALWAYS, GyroConfig().activationMode)
         assertEquals(GyroSensorSource.FUSED, parsed.gyro.sensorSource)
         assertEquals(3.0f, parsed.gyro.sensitivityX, 0.0001f)
         assertEquals(GyroCellAction.ACTIVATE, parsed.cells.single().gyroAction)
+    }
+
+    @Test
+    fun `ADS only activation roundtrips and missing mode defaults to always`() {
+        val original = GameProfile(
+            id = "ads-gyro",
+            name = "ADS Gyro",
+            gyro = GyroConfig(
+                enabled = true,
+                activationMode = GyroActivationMode.ADS_ONLY,
+                adsMultiplier = 0.5f,
+            ),
+        )
+        val parsed = ProfileJson.parse(ProfileJson.serialize(original))
+        assertEquals(GyroActivationMode.ADS_ONLY, parsed.gyro.activationMode)
+        assertEquals(0.5f, parsed.gyro.adsMultiplier, 0.0001f)
+
+        // Profiles written before ADS_ONLY existed have no mode field; they
+        // must migrate to the new always-on default rather than staying gated.
+        val migrated = ProfileJson.parse(
+            """{"id":"legacy-mode","name":"Legacy Mode","gyro":{"enabled":true,"sensitivityX":2.0}}""",
+        )
+        assertEquals(GyroActivationMode.ALWAYS, migrated.gyro.activationMode)
     }
 
     @Test
@@ -310,7 +334,7 @@ class ProfileJsonTest {
 
         val parsed = ProfileJson.parse(json)
         val gyro = parsed.gyro
-        assertEquals(GyroActivationMode.HOLD, gyro.activationMode)
+        assertEquals(GyroActivationMode.ALWAYS, gyro.activationMode)
         assertEquals(GyroSensorSource.FUSED, gyro.sensorSource)
         assertEquals(GyroConfig.MAX_SENSITIVITY, gyro.sensitivityX, 0.0001f)
         assertEquals(GyroConfig.MIN_SENSITIVITY, gyro.sensitivityY, 0.0001f)

@@ -23,6 +23,35 @@ enum class GyroActivationMode {
 
     /** Active only while at least one finger is inside the configured region. */
     REGION,
+
+    /**
+     * Active only while the logical right mouse button (ADS) is held, from any
+     * source: a touchscreen button, a key combination or a macro.
+     */
+    ADS_ONLY,
+}
+
+/**
+ * Resolves the per-tick arming decision for an activation [mode].
+ *
+ * The caller decides whether gameplay is available at all; this function only
+ * combines the mode with its arming inputs. ADS-only reads the logical RMB
+ * state rather than a specific cell id, so every supported input source that
+ * presses the right button enables gyro. Kept pure so the gameplay loop, the
+ * settings UI and JVM tests share one definition.
+ */
+internal fun resolveGyroActive(
+    mode: GyroActivationMode,
+    holdActive: Boolean,
+    toggleActive: Boolean,
+    regionActive: Boolean,
+    adsHeld: Boolean,
+): Boolean = when (mode) {
+    GyroActivationMode.ALWAYS -> true
+    GyroActivationMode.HOLD -> holdActive
+    GyroActivationMode.TOGGLE -> toggleActive
+    GyroActivationMode.REGION -> regionActive
+    GyroActivationMode.ADS_ONLY -> adsHeld
 }
 
 /**
@@ -51,11 +80,12 @@ enum class GyroCellAction {
  *
  * Sensitivities are pixels per degree, applied after the orientation math, so
  * the same value feels identical across phones. The ADS multiplier is applied
- * while mouse button 2 (right button / aim) is held.
+ * while mouse button 2 (right button / aim) is held. It scales gyro output
+ * only; the touchpad path never reads it.
  */
 data class GyroConfig(
     val enabled: Boolean = false,
-    val activationMode: GyroActivationMode = GyroActivationMode.HOLD,
+    val activationMode: GyroActivationMode = GyroActivationMode.ALWAYS,
     val sensorSource: GyroSensorSource = GyroSensorSource.FUSED,
     /** Pixels of mouse movement per degree of yaw. */
     val sensitivityX: Float = 3.0f,
@@ -140,6 +170,13 @@ data class GyroConfig(
         internal const val CALIBRATION_MAX_STDDEV = 0.35f
         /** Below this horizontal component the heading is ill-defined. */
         internal const val POLE_HORIZONTAL = 0.08f
+        /**
+         * A longer gap between processed orientation samples is treated as a
+         * stall and re-primed instead of replaying the accumulated angle.
+         */
+        internal const val MAX_FUSED_GAP_NS = 150_000_000L
+        /** A longer raw-gyro gap is dropped rather than integrated as a step. */
+        internal const val MAX_GYRO_GAP_NS = 50_000_000L
     }
 }
 
@@ -149,6 +186,24 @@ data class GyroCalibrationResult(
     val biasY: Float,
     val biasZ: Float,
     val accepted: Boolean,
+)
+
+/**
+ * Last processed gyro values, for the diagnostics HUD and tuning screen.
+ *
+ * Rates are the post-axis-enable values before the deadzone; [deadzoneActive]
+ * tells whether that step was suppressed. [outputDxPx]/[outputDyPx] are the
+ * per-tick mouse pixels after smoothing, ADS scaling, inversion and clamping.
+ */
+data class GyroTelemetry(
+    val yawRateDps: Float = 0f,
+    val pitchRateDps: Float = 0f,
+    val filteredYawRateDps: Float = 0f,
+    val filteredPitchRateDps: Float = 0f,
+    val intervalMs: Float = 0f,
+    val deadzoneActive: Boolean = false,
+    val outputDxPx: Float = 0f,
+    val outputDyPx: Float = 0f,
 )
 
 /**
@@ -171,8 +226,6 @@ internal data class Quat(val w: Float, val x: Float, val y: Float, val z: Float)
         z = w * other.z + x * other.y - y * other.x + z * other.w,
     )
 
-    fun inverse(): Quat = Quat(w, -x, -y, -z)
-
     /** Rotates a device-frame vector into world coordinates. */
     fun rotate(vx: Float, vy: Float, vz: Float): FloatArray {
         val out = FloatArray(3)
@@ -190,12 +243,6 @@ internal data class Quat(val w: Float, val x: Float, val y: Float, val z: Float)
         out[1] = vy + w * ty + (z * tx - x * tz)
         out[2] = vz + w * tz + (x * ty - y * tx)
     }
-
-    /** Device +Z axis (the direction the screen faces) in world coordinates. */
-    fun screenNormal(): FloatArray = rotate(0f, 0f, 1f)
-
-    /** Allocation-free [screenNormal]. */
-    fun screenNormalInto(out: FloatArray) = rotateInto(0f, 0f, 1f, out)
 
     companion object {
         val IDENTITY = Quat(1f, 0f, 0f, 0f)
@@ -221,6 +268,17 @@ internal fun wrapPi(angle: Float): Float {
  * Converts rotation-vector deltas or calibrated gyro rates into the same
  * Q16.16 mouse movement format used by the touchpad.
  *
+ * The flat-phone control frame follows the phone's short axis (device +X).
+ * With the phone flat in landscape that axis points away from the player, so
+ * its world heading is yaw and its tilt is pitch. Rotating about the long edge
+ * (device Y) pitches the aim axis; rotating about the short axis itself leaves
+ * both heading and tilt unchanged, so that roll is ignored. The neutral pose is
+ * anchored at [recenter]/activation, which makes the absolute grip angle,
+ * portrait/landscape rotation and any constant off-level tilt irrelevant.
+ *
+ * This decomposition is exact for yaw about gravity, pitch about the long
+ * edge, and an arbitrary ignored roll about the short axis.
+ *
  * The mapper is deliberately pure Kotlin (no Android imports) so the yaw/pitch
  * math, recentering, deadzone, inversion and ADS scaling are JVM-testable.
  * Feed it from a single thread; [MotionAccumulator] handles cross-thread
@@ -237,15 +295,42 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
 
     private var active = false
     private var haveAngles = false
-    private var lastHeading = 0f
+    private var lastYaw = 0f
     private var lastPitch = 0f
 
     private var lastTickNs = 0L
-    private var lastGyroSampleTs = 0L
+    /** False until the first sample after activation; large-gap guards only apply while aiming. */
+    private var gapGuardArmed = false
+    /** True while the aim vector is too vertical for a stable yaw. */
+    private var atPole = false
     private var smoothedYawRate = 0f
     private var smoothedPitchRate = 0f
-    private val normal = FloatArray(3)
-    private val worldRate = FloatArray(3)
+    private var lastTelemetry = GyroTelemetry()
+
+    /** Physical short-axis vector (+X) in world coordinates, see [orientationDelta]. */
+    private val aimAxis = FloatArray(3)
+    private val worldVector = FloatArray(3)
+
+    /**
+     * Sign applied to pitch so that lifting the far edge reads positive. The
+     * aim axis points away from the player when the display is rotated 90°
+     * (normal landscape); it points toward the player at 270° (reverse
+     * landscape), which mirrors the gesture. Values match
+     * `android.view.Surface.ROTATION_*`.
+     */
+    private var pitchSign = 1f
+
+    /** Updates the landscape chirality; see [pitchSign]. */
+    fun setDisplayRotation(rotation: Int) {
+        val next = if (rotation == 3) -1f else 1f
+        if (next != pitchSign) {
+            pitchSign = next
+            // Existing pitch baselines were measured with the old sign.
+            // Re-prime on the next sample so flipping the phone cannot turn
+            // the sign change into a one-frame camera jump.
+            haveAngles = false
+        }
+    }
 
     private val bias = floatArrayOf(config.biasX, config.biasY, config.biasZ)
     private var lastAutoBiasTs = 0L
@@ -269,14 +354,16 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
             clean.biasY != config.biasY ||
             clean.biasZ != config.biasZ
         val sourceChanged = clean.sensorSource != config.sensorSource
+        val modeChanged = clean.activationMode != config.activationMode
         config = clean
         if (biasChanged) {
             bias[0] = clean.biasX
             bias[1] = clean.biasY
             bias[2] = clean.biasZ
         }
-        if (sourceChanged) {
+        if (sourceChanged || modeChanged) {
             resetMotionState()
+            lastTickNs = 0L
         }
     }
 
@@ -284,17 +371,28 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
     fun setActive(next: Boolean) {
         if (next == active) return
         active = next
-        if (config.recenterOnRelease) {
-            // Deactivation forgets the neutral pose, so the next activation
-            // primes against wherever the phone is then.
-            resetMotionState()
-        } else {
-            // Keep the orientation baseline across disarm/rearm; the camera
-            // reflects the pose change when aiming resumes. Raw-gyro
-            // integration still starts from a fresh sample.
-            smoothedYawRate = 0f
-            smoothedPitchRate = 0f
-            lastGyroSampleTs = 0L
+        // The first sample after either transition intentionally has no gap
+        // guard: activation must prime, and recenterOnRelease=false must be
+        // able to reflect the pose change accumulated while disarmed.
+        gapGuardArmed = false
+        lastTelemetry = GyroTelemetry()
+        when {
+            // ADS entry always starts from the pose at the moment ADS was
+            // pressed. Without this, recenterOnRelease=false would replay the
+            // whole pose change accumulated while ADS was released as a jump.
+            next && config.activationMode == GyroActivationMode.ADS_ONLY -> recenter()
+            config.recenterOnRelease -> {
+                // Deactivation forgets the neutral pose, so the next activation
+                // primes against wherever the phone is then.
+                resetMotionState()
+            }
+            else -> {
+                // Keep the orientation baseline across disarm/rearm; the camera
+                // reflects the pose change when aiming resumes. Raw-gyro
+                // integration still starts from a fresh sample.
+                smoothedYawRate = 0f
+                smoothedPitchRate = 0f
+            }
         }
         lastTickNs = 0L
     }
@@ -307,6 +405,7 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
         haveAngles = false
         lastProcessedQuatTs = 0L
         resetMotionState()
+        lastTelemetry = GyroTelemetry()
         // Also re-prime the raw-gyro integration; otherwise the tick after
         // recentering would still emit the accumulated one-tick delta.
         lastTickNs = 0L
@@ -323,6 +422,7 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
         calSumZ = 0.0
         calSumSq = 0.0
         calibrationResult = null
+        lastTelemetry = GyroTelemetry()
     }
 
     /** Abandon an in-flight calibration (disconnect, disable, profile switch). */
@@ -342,6 +442,9 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
     /** Current runtime bias (auto-calibration may have refined it). */
     fun biasSnapshot(): FloatArray = bias.copyOf()
 
+    /** Last processed rates/output for diagnostics; safe to read from the UI thread. */
+    fun telemetry(): GyroTelemetry = lastTelemetry
+
     /**
      * Feed the latest sensor mailbox values and return the movement since the
      * previous call. [gyro] is device-frame rad/s; [quaternion] is Android's
@@ -355,7 +458,10 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
         nowNs: Long,
         adsActive: Boolean,
     ): Motion {
-        val newQuat = quatTsNs > 0 && quatTsNs != lastQuatTs
+        // Accept only a strictly newer orientation sample. Equal timestamps are
+        // duplicates and older timestamps are out-of-order; both would make the
+        // interval negative/nonsensical if processed.
+        val newQuat = quatTsNs > 0 && quatTsNs > lastQuatTs
         if (newQuat) {
             lastQuatTs = quatTsNs
             quat = Quat.fromRotationVector(quaternion)
@@ -383,32 +489,61 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
     }
 
     private fun orientationDelta(adsActive: Boolean): Motion {
-        quat.screenNormalInto(normal)
-        val horizontal = hypot(normal[0], normal[1])
-        val heading = atan2(normal[0], normal[1])
-        val pitch = asin(normal[2].coerceIn(-1f, 1f))
+        // Track the physical short axis (+X) in the world frame. With the phone
+        // flat in landscape this axis points away from the player: its heading
+        // is yaw and its tilt is pitch. Rotating about the long edge changes the
+        // tilt; rotating about the short axis itself leaves the vector
+        // unchanged, so that roll is ignored exactly.
+        quat.rotateInto(1f, 0f, 0f, aimAxis)
+        val fx = aimAxis[0]
+        val fy = aimAxis[1]
+        val fz = aimAxis[2]
+        val horizontal = hypot(fx, fy)
+        val yaw = -atan2(fy, fx)
+        val pitch = pitchSign * asin(fz.coerceIn(-1f, 1f))
 
         if (!haveAngles) {
-            lastHeading = heading
+            lastYaw = yaw
             lastPitch = pitch
+            atPole = horizontal < GyroConfig.POLE_HORIZONTAL
             haveAngles = true
             lastProcessedQuatTs = lastQuatTs
+            gapGuardArmed = true
             return Motion(0, 0)
         }
 
-        var deltaHeading = wrapPi(heading - lastHeading)
+        val gapNs = lastQuatTs - lastProcessedQuatTs
+        if (gapGuardArmed && gapNs > GyroConfig.MAX_FUSED_GAP_NS) {
+            // The orientation sensor stalled (or the mapper tick was frozen)
+            // long enough that replaying the whole angle as one step would
+            // fling the camera. Re-baseline and emit nothing.
+            lastYaw = yaw
+            lastPitch = pitch
+            atPole = horizontal < GyroConfig.POLE_HORIZONTAL
+            lastProcessedQuatTs = lastQuatTs
+            smoothedYawRate = 0f
+            smoothedPitchRate = 0f
+            lastTelemetry = GyroTelemetry(intervalMs = gapNs / 1_000_000f)
+            return Motion(0, 0)
+        }
+
+        val atPoleNow = horizontal < GyroConfig.POLE_HORIZONTAL
+        var deltaYaw = wrapPi(yaw - lastYaw)
         val deltaPitch = pitch - lastPitch
-        // Straight up/down makes heading undefined; do not emit yaw noise there.
-        if (horizontal < GyroConfig.POLE_HORIZONTAL) deltaHeading = 0f
-        lastHeading = heading
+        // Near a vertical aim vector the heading is ill-defined. Suppress yaw
+        // on the pole and on the first frame after leaving it.
+        if (atPoleNow || atPole) deltaYaw = 0f
+        atPole = atPoleNow
+        lastYaw = yaw
         lastPitch = pitch
 
-        val dt = ((lastQuatTs - lastProcessedQuatTs) / 1_000_000_000.0)
+        val dt = (gapNs / 1_000_000_000.0)
             .toFloat()
             .coerceIn(0.002f, 0.2f)
         lastProcessedQuatTs = lastQuatTs
+        gapGuardArmed = true
 
-        val yawRate = Math.toDegrees(deltaHeading.toDouble()).toFloat() / dt
+        val yawRate = Math.toDegrees(deltaYaw.toDouble()).toFloat() / dt
         val pitchRate = Math.toDegrees(deltaPitch.toDouble()).toFloat() / dt
         return ratesToMotion(yawRate, pitchRate, dt, adsActive)
     }
@@ -418,48 +553,62 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
         gyroTsNs: Long,
         adsActive: Boolean,
     ): Motion {
-        // Never integrate the same sensor sample twice: the mailbox keeps the
+        // Never integrate the same sensor sample twice. The mailbox keeps the
         // last value, so a stalled sensor would otherwise drift forever.
-        if (gyroTsNs <= 0 || gyroTsNs == lastGyroSampleTs) return Motion(0, 0)
+        if (gyroTsNs <= 0) return Motion(0, 0)
         if (lastTickNs != 0L && gyroTsNs <= lastTickNs) return Motion(0, 0)
-        lastGyroSampleTs = gyroTsNs
+
+        val firstSample = lastTickNs == 0L
+        val gapNs = if (firstSample) 0L else gyroTsNs - lastTickNs
+        lastTickNs = gyroTsNs
+        if (firstSample) return Motion(0, 0)
+
+        if (gapNs > GyroConfig.MAX_GYRO_GAP_NS) {
+            // A long stall must not be integrated as a fake 50 ms step of the
+            // current rate. Drop that interval and re-baseline the integrator.
+            smoothedYawRate = 0f
+            smoothedPitchRate = 0f
+            lastTelemetry = GyroTelemetry(intervalMs = gapNs / 1_000_000f)
+            return Motion(0, 0)
+        }
 
         // Sensor timestamps avoid jitter from the coroutine's wake-up time.
-        val dt = if (lastTickNs == 0L) {
-            0f
-        } else {
-            ((gyroTsNs - lastTickNs) / 1_000_000_000.0)
-                .toFloat()
-                .coerceIn(0.001f, 0.05f)
-        }
-        lastTickNs = gyroTsNs
-        if (dt <= 0f) return Motion(0, 0)
+        val dt = (gapNs / 1_000_000_000.0)
+            .toFloat()
+            .coerceIn(0.001f, 0.05f)
 
+        // The orientation sensor supplies the current pose; rotate both the
+        // physical short axis and the calibrated body rate into the world
+        // frame. Heading about gravity and tilt of that axis give yaw/pitch.
         val wxDevice = gyro[0] - bias[0]
         val wyDevice = gyro[1] - bias[1]
         val wzDevice = gyro[2] - bias[2]
-        quat.rotateInto(wxDevice, wyDevice, wzDevice, worldRate)
-        val wx = worldRate[0]
-        val wy = worldRate[1]
-        val wz = worldRate[2]
-        quat.screenNormalInto(normal)
-        val d0 = normal[0]
-        val d1 = normal[1]
-        val d2 = normal[2]
-        val h2 = d0 * d0 + d1 * d1
+        quat.rotateInto(1f, 0f, 0f, aimAxis)
+        quat.rotateInto(wxDevice, wyDevice, wzDevice, worldVector)
+        val wx = worldVector[0]
+        val wy = worldVector[1]
+        val wz = worldVector[2]
+        val f0 = aimAxis[0]
+        val f1 = aimAxis[1]
+        val h2 = f0 * f0 + f1 * f1
         val horizontal = sqrt(h2)
 
-        // Heading rate of the screen-normal ray. For a horizontal ray this is
-        // -ωz; the extra term accounts for tilting a slanted ray.
-        val yawRateRad = if (h2 >= GyroConfig.POLE_HORIZONTAL * GyroConfig.POLE_HORIZONTAL) {
-            (d2 * (wx * d0 + wy * d1)) / h2 - wz
-        } else {
-            -wz
-        }
-        // d(d.z)/dt = (ω × d).z, and d.z = sin(pitch), so
-        // pitchRate = (ω × d).z / cos(pitch).
+        // df/dt = ω × f. yaw = −atan2(f.y, f.x), so its rate is
+        // (f.y·df.x − f.x·df.y) / |f_h|².
+        val dfx = wy * aimAxis[2] - wz * f1
+        val dfy = wz * f0 - wx * aimAxis[2]
+        val dfz = wx * f1 - wy * f0
+        val yawRateRad =
+            if (h2 >= GyroConfig.POLE_HORIZONTAL * GyroConfig.POLE_HORIZONTAL) {
+                (f1 * dfx - f0 * dfy) / h2
+            } else {
+                // The aim axis is vertical; its heading is unstable. Do not
+                // let yaw noise move the camera on the pole.
+                0f
+            }
+        // f.z = sin(pitch / pitchSign), so pitchRate = pitchSign·df.z/cos(pitch).
         val cosPitch = horizontal.coerceAtLeast(0.15f)
-        val pitchRateRad = (wx * d1 - wy * d0) / cosPitch
+        val pitchRateRad = pitchSign * dfz / cosPitch
 
         return ratesToMotion(
             Math.toDegrees(yawRateRad.toDouble()).toFloat(),
@@ -475,17 +624,19 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
         dt: Float,
         adsActive: Boolean,
     ): Motion {
-        var yawRate = if (config.enableYaw) yawRateDps else 0f
-        var pitchRate = if (config.enablePitch) pitchRateDps else 0f
-
-        if (hypot(yawRate, pitchRate) < config.deadzoneDps) {
-            yawRate = 0f
-            pitchRate = 0f
+        val yawRate = if (config.enableYaw) yawRateDps else 0f
+        val pitchRate = if (config.enablePitch) pitchRateDps else 0f
+        val deadzone = hypot(yawRate, pitchRate) < config.deadzoneDps
+        var filteredYaw = yawRate
+        var filteredPitch = pitchRate
+        if (deadzone) {
+            filteredYaw = 0f
+            filteredPitch = 0f
         }
 
         val alpha = smootherAlpha(dt)
-        smoothedYawRate += alpha * (yawRate - smoothedYawRate)
-        smoothedPitchRate += alpha * (pitchRate - smoothedPitchRate)
+        smoothedYawRate += alpha * (filteredYaw - smoothedYawRate)
+        smoothedPitchRate += alpha * (filteredPitch - smoothedPitchRate)
 
         val adsScale = if (adsActive) config.adsMultiplier else 1f
         var dx = smoothedYawRate * dt * config.sensitivityX * adsScale
@@ -498,6 +649,17 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
         dy = dy.coerceIn(-limit, limit)
         if (!dx.isFinite()) dx = 0f
         if (!dy.isFinite()) dy = 0f
+
+        lastTelemetry = GyroTelemetry(
+            yawRateDps = yawRate,
+            pitchRateDps = pitchRate,
+            filteredYawRateDps = smoothedYawRate,
+            filteredPitchRateDps = smoothedPitchRate,
+            intervalMs = dt * 1_000f,
+            deadzoneActive = deadzone,
+            outputDxPx = dx,
+            outputDyPx = dy,
+        )
 
         return Motion(
             dxQ16 = (dx * Q16).roundToInt(),
@@ -582,7 +744,9 @@ class GyroMapper(initialConfig: GyroConfig = GyroConfig()) {
         smoothedYawRate = 0f
         smoothedPitchRate = 0f
         haveAngles = false
-        lastGyroSampleTs = 0L
+        atPole = false
+        gapGuardArmed = false
+        lastTelemetry = GyroTelemetry()
     }
 
     private companion object {

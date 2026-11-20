@@ -236,7 +236,7 @@ object ProfileJson {
                 enabled = gyroObj["enabled"]?.asBoolean(false) ?: false,
                 activationMode = enumOrDefault(
                     gyroObj["activationMode"]?.asString(),
-                    GyroActivationMode.HOLD,
+                    GyroActivationMode.ALWAYS,
                 ),
                 sensorSource = enumOrDefault(
                     gyroObj["sensorSource"]?.asString(),

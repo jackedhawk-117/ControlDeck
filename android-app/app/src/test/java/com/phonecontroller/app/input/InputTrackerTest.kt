@@ -62,6 +62,27 @@ class InputTrackerTest {
     }
 
     @Test
+    fun `right button held state drives ads detection`() {
+        val tracker = InputTracker()
+        assertFalse(tracker.isMouseButtonHeld(Protocol.MOUSE_RIGHT))
+
+        tracker.press("lmb", ControlAction(mouseButtons = listOf(Protocol.MOUSE_LEFT)))
+        // Firing while not aiming must not enable ADS scaling.
+        assertFalse(tracker.isMouseButtonHeld(Protocol.MOUSE_RIGHT))
+
+        tracker.press("rmb", rmb)
+        assertTrue(tracker.isMouseButtonHeld(Protocol.MOUSE_RIGHT))
+
+        // A second action on the same button must not end ADS early.
+        tracker.press("aim", rmb)
+        tracker.release("rmb")
+        assertTrue(tracker.isMouseButtonHeld(Protocol.MOUSE_RIGHT))
+
+        tracker.release("aim")
+        assertFalse(tracker.isMouseButtonHeld(Protocol.MOUSE_RIGHT))
+    }
+
+    @Test
     fun `mouse bits cover all five buttons`() {
         val tracker = InputTracker()
         for (button in 1..5) {

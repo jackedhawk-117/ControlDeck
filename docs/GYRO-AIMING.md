@@ -1,12 +1,14 @@
 # Gyro aiming — implementation reference (Milestone 6)
 
-> **Status: implemented phone-side, JVM-tested, not yet validated on a physical
-> device.** The wire protocol is unchanged: raw sensor data never leaves the
-> phone; only the resulting Q16.16 mouse deltas are transmitted.
+> **Status: implemented and JVM-tested; live device telemetry and an end-to-end
+> horizontal sweep are verified, but far-edge pitch and the full physical
+> acceptance sequence are still pending.** The wire protocol is unchanged: raw
+> sensor data never leaves the phone; only the resulting Q16.16 mouse deltas are
+> transmitted.
 
-The goal is console-style motion aiming (Switch/DualSense-like): large camera
-movement on the touchpad, fine aim with the gyroscope, both feeding one mouse
-pipeline.
+The goal is console-style motion aiming for a phone held approximately flat,
+screen up: large camera movement on the touchpad, fine aim with the gyroscope,
+both feeding one mouse pipeline.
 
 ## 1. Sensors and source selection
 
@@ -29,11 +31,13 @@ are dropped so a restart cannot ingest a stale sample.
 Two selectable sources share the same output path:
 
 - **FUSED (default)** — reads each new rotation-vector sample and derives the
-  heading/elevation of the screen normal. It never drifts.
-- **GYRO (optional)** — integrates calibrated device-frame angular velocity at
-  the input tick rate. It is smoother on phones with a slow rotation-vector
-  sensor but drifts until the next recenter. Duplicate/stale sensor samples are
-  ignored, so a stalled sensor cannot keep integrating forever.
+  world heading and tilt of the phone's physical short axis. It never drifts.
+- **GYRO (optional)** — uses the calibrated device-frame angular velocity,
+  rotates it into the world frame with the current orientation, and tracks the
+  same short-axis heading/tilt at the input tick rate. It is smoother on phones
+  with a slow rotation-vector sensor but drifts until the next recenter.
+  Duplicate/stale sensor samples are ignored, so a stalled sensor cannot keep
+  integrating forever.
 
 Both sources require an orientation sensor for a stable yaw/pitch reference.
 Phones without one show gyro as unavailable instead of guessing from the
@@ -41,41 +45,88 @@ accelerometer.
 
 ## 2. Orientation math
 
-The mapper tracks the **screen normal** — device +Z, the direction the screen
-faces — as a unit vector in world coordinates:
+The player holds the phone approximately flat, screen up, in landscape. The
+mapper tracks the **physical short axis** (+X) of the phone, not the top edge
+and not the screen normal:
 
 1. Convert Android's `(x, y, z, w)` rotation vector to a normalized quaternion
-   `q`.
-2. Rotate `(0, 0, 1)` by `q`: `d = q · ẑ`.
-3. `heading = atan2(d.x, d.y)` and `pitch = asin(d.z)`.
-4. Per new orientation sample, take wrapped differences
-   `dHeading = wrapPi(heading - lastHeading)` and
-   `dPitch = pitch - lastPitch`, divide by the sensor-timestamp interval, then
-   convert to mouse pixels.
-5. **Roll around the screen normal therefore produces no camera movement**,
-   which is the requested default. There is no roll axis to disable in the UI;
-   yaw and pitch can each be disabled independently.
+   `q` (device → world, world Z up).
+2. Rotate the physical short axis by `q`: `f = q · x̂` (world coordinates).
+3. `yaw = −atan2(f.y, f.x)` — heading about the gravity-aligned world Z axis.
+   A right rotation is positive and maps to positive mouse `dx`.
+4. `pitch = pitchSign · asin(f.z)` — tilt of the short axis. Lifting the far
+   edge raises `f.z`; `pitchSign = +1` when the display is
+   `Surface.ROTATION_90` (normal landscape, short axis points away from the
+   player) and `−1` at `ROTATION_270` (reverse landscape).
+5. Per new orientation sample, take wrapped differences
+   `dYaw = wrapPi(yaw − lastYaw)` and `dPitch = pitch − lastPitch`, divide by
+   the sensor-timestamp interval, then convert to mouse pixels.
 
-Near the poles (`|d.xy| < 0.08`) heading is ill-defined. The mapper reports zero
-yaw for that step but still updates the baseline, so leaving the pole does not
-release a large stored jump.
+`PlayScreen` registers a `DisplayManager.DisplayListener` and calls
+`GyroMapper.setDisplayRotation(display.rotation)` whenever the surface rotates.
+The math always uses the physical device axes; this only corrects the facing of
+the pitch gesture in reverse landscape. A mid-session rotation change re-primes
+the mapper, so the sign switch cannot become a one-frame camera jump.
 
-The FUSED source uses sensor timestamps for `dt` (clamped to 2–200 ms). The GYRO
-source rotates angular velocity into world space with the current quaternion,
-computes the heading/pitch rates of the screen normal, and integrates with the
-raw gyro sample timestamp (clamped to 1–50 ms).
+For `q = Rz(yaw)·Ry(pitch)·Rx(roll)`, the pair above is exact (verified to
+float precision over ±170° yaw and ±80° pitch with arbitrary roll). A rotation
+about the short axis (`Rx`) leaves `f` invariant, so that roll is ignored
+exactly. A rotation about the long axis (`Ry`) changes only the tilt, and a
+rotation about the world vertical (`Rz`) changes only the heading.
 
-Recenter stores the current orientation as the new baseline. The next sample
-produces no delta, for both sources.
+This model replaced an earlier top-edge scheme. The vertical phyphox capture is
+97.7% rotation about **device Y** (the long edge). The top-edge vector lies
+along that rotation axis, so it barely moves during the real pitch gesture; the
+old model could not see it. The short axis is perpendicular to the gesture and
+tilts by exactly the pitch angle, which is why the current model tracks it.
+
+The neutral pose is a **relative baseline anchored at recenter**: the mapper
+stores yaw and pitch at the current pose and emits only differences. Absolute
+world heading and the grip's resting tilt therefore do not matter. The 18.7°
+and 23.2° principal-axis offsets in the horizontal captures are a constant
+far-edge-up hold (a pitch offset about the long axis), not roll; they baseline
+out and cannot leak into yaw because yaw is measured about gravity. The JVM
+regressions `flat yaw from a tilted neutral does not leak into pitch`,
+`pitch from a tilted neutral changes only the vertical axis` and the 23.1°
+alternating-sweep test pin this down.
+
+**Requirement conflict, resolved deliberately.** With the phone flat, a twist
+about the screen normal *is* the required left/right yaw, and it is physically
+the same motion as yaw about gravity. It cannot also be ignored. The ignored
+axis is roll about the short axis, which is not a useful aiming gesture.
+
+Near the poles (`|f.xy| < 0.08`, i.e. the short axis within ~4.6° of vertical)
+heading is ill-defined. The mapper reports zero yaw for that step and for the
+first step after leaving the pole, but still updates the baseline, so leaving
+the pole does not release a large stored jump. `asin` represents pitch over
+±90°; aiming past vertical is outside the usable range.
+
+The FUSED source uses sensor timestamps for `dt` (clamped to 2–200 ms). The
+GYRO source rotates angular velocity into world space with the current
+quaternion, forms `df/dt = ω × f`, and uses the analytic rates
+`yawRate = (f.y·df.x − f.x·df.y) / |f.xy|²` and
+`pitchRate = pitchSign · df.z / |f.xy|`. It integrates with the raw gyro sample
+timestamp (clamped to 1–50 ms).
+
+Recenter stores the current pose as the new baseline. The next sample produces
+no delta, for both sources.
 
 ## 3. Activation modes
 
 | Mode | Behavior |
 |---|---|
-| Always | Contributes whenever a paired session is in gameplay and this profile enables gyro |
+| Always (default) | Contributes whenever a paired session is in gameplay and this profile enables gyro; releasing RMB does not stop it |
+| ADS only | Contributes only while the logical right mouse button (ADS) is held; touchpad input keeps working when it is released |
 | Hold | Contributes only while a `GYRO` activation cell is held |
 | Toggle | A `GYRO` activation cell latches aiming on or off |
 | Region | Contributes while at least one finger is inside the configured canvas rectangle |
+
+ADS-only reads `InputTracker.isMouseButtonHeld(MOUSE_RIGHT)`, not a cell id.
+The tracker reference-counts the button across every source, so a touchscreen
+aim button, a key combination that contains RMB and a macro all activate gyro,
+and releasing one source does not disable it while another still holds RMB.
+The right button is also what applies the ADS sensitivity multiplier in the
+other modes; it never gates Always On.
 
 Region detection observes pointer events in the **Initial** pass and never
 consumes them, so a finger inside the zone still presses controls underneath
@@ -86,7 +137,10 @@ Opening the editor, either tuning screen, the profile manager, or disconnecting
 disarms gyro. A profile switch resets hold/toggle/region state. Activation and
 deactivation always re-prime the mapper (unless "re-prime neutral pose after
 hold release" is explicitly disabled), so transitions do not cause a camera
-jump.
+jump. ADS entry is stricter: it always re-primes, even when
+`recenterOnRelease = false`, because otherwise the pose change accumulated
+while ADS was released would replay as a jump. The tuning overlay keeps the
+mapper running for preview but bypasses the ADS gate and never injects.
 
 The `recenterOnRelease` option controls what happens to the neutral pose when
 aiming is disarmed:
@@ -94,7 +148,8 @@ aiming is disarmed:
 - **on (default)** — forget the old pose; the next activation is neutral
   wherever the phone is held.
 - **off** — keep the old pose; re-arming reflects orientation changes made while
-  disarmed. This is intentionally a jump, bounded by the per-tick clamp.
+  disarmed. This is intentionally a jump, bounded by the per-tick clamp. In
+  ADS-only mode the explicit ADS-entry re-prime overrides this for safety.
 
 Overlays and profile changes always call `recenter()` regardless of this option.
 
@@ -116,8 +171,11 @@ Per tick, in order:
    overwrite or stall each other.
 
 ADS is detected as mouse button 2 (right button) being held by any source,
-including a toggle. The ADS multiplier is applied only to gyro sensitivity;
-touchpad sensitivity is unchanged.
+including a toggle. The same logical state arms the mapper in ADS-only mode;
+the decision is re-read on every 120 Hz tick, so release stops gyro output on
+the next tick without waiting for a Compose recomposition. The ADS multiplier
+is applied only to gyro sensitivity; touchpad sensitivity is unchanged. In
+Always On, RMB only changes that multiplier and never disables gyro.
 
 ## 5. Calibration
 
@@ -145,7 +203,7 @@ without that object decodes as a disabled default, so old exports still load.
 | Field | Default | Range / notes |
 |---|---|---|
 | `enabled` | `false` (bundled FPS profile: `true`) | enable gyro for this profile |
-| `activationMode` | `HOLD` | `ALWAYS`, `HOLD`, `TOGGLE`, `REGION` |
+| `activationMode` | `ALWAYS` | `ALWAYS`, `ADS_ONLY`, `HOLD`, `TOGGLE`, `REGION` |
 | `sensorSource` | `FUSED` | `FUSED`, `GYRO` |
 | `sensitivityX/Y` | `3.0` | 0.25–20 px per degree |
 | `invertX/Y` | `false` | axis inversion |
@@ -161,7 +219,12 @@ without that object decodes as a disabled default, so old exports still load.
 
 Cells of type `GYRO` carry `"gyroAction": "ACTIVATE"` (default) or
 `"RECENTER"`. The bundled FPS profile adds `GYRO` and `CENTER` cells and enables
-gyro in `HOLD` mode with 2.6/2.2 px/° sensitivity.
+always-on gyro with 2.6/2.2 px/° sensitivity.
+
+A profile or exported JSON without `activationMode` decodes as `ALWAYS`; this
+includes profiles written before ADS-only existed. Profiles that explicitly
+stored `HOLD`, `TOGGLE` or `REGION` keep that behavior. Serialization writes the
+enum name, so `ADS_ONLY` survives export/import and profile switching.
 
 Imports are sanitized (finite values, clamped ranges, enum fallback, region
 kept inside the canvas). Hostile values cannot produce NaN deltas or an
@@ -172,33 +235,85 @@ out-of-bounds region.
 - **Play screen** top bar: `Gyro` button opens tuning; it shows `Gyro ●` while
   aiming is active.
 - **Gyro settings screen**: source availability and live sensor rates, enable
-  toggle, activation/source chips, all sliders and toggles, region rectangle
-  controls, sensor explanation, calibration status/value, recenter and reset.
+  toggle, activation/source chips (Always on, ADS only, Hold, Toggle, Region),
+  all sliders and toggles, region rectangle controls, sensor explanation,
+  calibration status/value, recenter and reset. Status distinguishes disabled,
+  aiming active, ADS-not-held and live tuning preview. The mapping text states
+  that short-axis roll is ignored by construction, so there is no misleading
+  roll toggle.
 - **Cell editor**: a `Gyro` type with `Arm gyro` / `Recenter` action cards.
 - **Grid editor**: `+ Gyro` adds an activation cell.
-- **Diagnostics HUD**: gyro on/off/armed/aiming state, active source, and live
-  gyro/orientation sample rates.
+- **Diagnostics HUD**: gyro on/off/armed/aiming state, activation mode, logical
+  ADS state, active source, live gyro/orientation sample rates, yaw/pitch rates
+  and per-tick output. ADS-only shows `inactive · ADS not held` explicitly.
+- **Overlays**: tune while the mapper runs as a non-injecting preview; the
+  preview deliberately ignores the ADS gate so ADS-only can be tuned without
+  holding RMB.
 
 ## 8. Testing and limitations
 
-JVM tests (`GyroMapperTest`) cover:
+Automated validation (all green at the time of writing):
 
-- right/up turn signs, roll rejection, heading wrap;
-- recenter and activation with no jump; `recenterOnRelease = false`;
+- Android JVM: **153 tests**, `assembleDebug`, `lintDebug`.
+- Rust receiver: **56 tests**, `cargo clippy --workspace --all-targets -D warnings`.
+
+`GyroMapperTest` (52 tests) covers:
+
+- short-axis yaw/pitch signs in normal and reverse landscape;
+- a 60° sweep about the long edge producing pitch only (the vertical capture);
+- roll about the short axis ignored at identity and from an arbitrary
+  yaw+pitch pose;
+- yaw purity from a tilted neutral (19°/23.1° matching the horizontal captures)
+  and pitch from a tilted neutral;
+- six alternating ±140° sweeps at the 23.1° tilt measured in the second
+  capture, with accumulated pitch held at zero;
+- landscape grip, combined yaw+pitch, a 40-step coupled yaw+pitch sweep,
+  heading wrap and pole exit;
+- recenter and activation with no jump, including after a session
+  disconnect/reconnect; `recenterOnRelease = false`;
+- Always On without ADS, ADS-only gating from the logical right button,
+  independence from hold/toggle/region inputs, ADS release, and ADS re-entry
+  after a disarmed pose change with no replay jump;
+- FUSED and GYRO totals independent of the sensor sample rate, plus the
+  duplicate/stall gap guards;
 - axis enable/invert, deadzone, per-tick clamp, smoothing motion preservation;
-- ADS multiplier; region hit testing; hostile config sanitization;
-- raw-gyro integration signs and duplicate-sample rejection;
-- explicit calibration acceptance/rejection;
-- quaternion helpers;
+- ADS multiplier and proof that the touchpad contribution is not scaled;
+- region hit testing; hostile config sanitization;
+- raw-gyro yaw/pitch signs, rolled-grip yaw purity, duplicate/stall handling;
+- explicit calibration acceptance/rejection; quaternion helpers;
 - gyro + touchpad summation through one `MotionAccumulator`.
 
-`ProfileJsonTest` covers gyro/cell round-trip, legacy profiles without a gyro
-object, and hostile import clamping.
+`ProfileJsonTest` (17 tests) covers gyro/cell round-trip, legacy profiles
+without a gyro object, ADS-only round-trip, missing-mode migration to `ALWAYS`,
+and hostile import clamping.
 
-Not yet verified: physical-device sensor rates, real drift, in-game feel,
-touchpad+gyro hybrid aiming while firing, and behavior across all four screen
-orientations. Those are Milestone 7 device tests; the math is synthetic-input
-tested only. The original plan mentioned a one-euro filter and
-`SensorManager.remapCoordinateSystem`; the implementation uses a simpler
-time-constant low-pass and derives yaw/pitch from the screen normal, which is
-already invariant to portrait/landscape rotation.
+### phyphox captures
+
+All four captures run at ~397 Hz. Energy is the share of rotational variance on
+each device axis; the principal axis is given in device coordinates.
+
+| Capture | Length | X / Y / Z energy | Principal axis (angle from Z) | Interpretation |
+|---|---|---|---|---|
+| `left movement.xlsx` | 14.1 s, 5,604 | 10.5 / 2.9 / 86.7% | (0.306, −0.097, 0.947), 18.7° | yaw through a ~19° far-edge-up grip |
+| `horizontal movement.xlsx` | 34.3 s, 13,600 | 16.2 / 3.5 / 80.3% | (0.394, −0.029, 0.919), 23.2° | 22 alternating strokes (+132°±40 left, −142°±30 right, 1.3–1.5 s each); `gx`–`gz` r=0.93 at zero lag |
+| `verticalmovement.xlsx` | 69.1 s, 27,413 | 1.5 / **97.7** / 0.8% | (−0.022, −1.000, 0.003), 89.8° | far-edge up/down is a clean rotation about device Y; the decisive capture for the short-axis model |
+| `combined horizontal and vertical.xlsx` | 38.0 s, 15,079 | 20.1 / 46.1 / 33.9% | (0.047, −0.993, 0.104), 84.0° | concurrent yaw and pitch, still dominated by long-axis rotation; xy −0.06, xz +0.41, yz −0.02 |
+
+Device evidence:
+
+- live sensor mailbox at ~199 Hz gyro / ~100 Hz orientation;
+- a 200 s end-to-end evtest recording on the virtual device captured 14,463
+  `REL_X`/`REL_Y` events. The first activity cluster (16.5 s of left rotation)
+  produced −597 px horizontal and +20 px vertical, i.e. ~3% leakage; no
+  vertical or combined gesture was captured in that pass.
+
+Not yet verified: Always On and ADS-only activation **end to end** on hardware,
+the far-edge-up/down and combined gestures end to end, reverse-landscape
+physical repeat, recenter at a new tilted pose, in-game feel, hybrid aiming
+while firing, drift/long-session soak, Steam/Proton and Windows runtime. The
+2026-11-19 pitch captures recorded zero motion because the phone was stationary,
+so the pitch sign is still backed by synthetic tests rather than a clean live
+run. Those remain Milestone 7 device tests.
+`SensorManager.remapCoordinateSystem` is unnecessary: the mapper uses the
+physical device axes and only uses the display rotation to select the pitch
+sign.

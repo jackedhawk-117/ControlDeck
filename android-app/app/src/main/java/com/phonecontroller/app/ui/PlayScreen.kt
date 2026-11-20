@@ -1,5 +1,9 @@
 package com.phonecontroller.app.ui
 
+import android.hardware.display.DisplayManager
+import android.os.Handler
+import android.os.Looper
+import android.view.Surface
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -52,6 +56,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,6 +71,7 @@ import com.phonecontroller.app.input.GyroCalibrationResult
 import com.phonecontroller.app.input.GyroCellAction
 import com.phonecontroller.app.input.GyroConfig
 import com.phonecontroller.app.input.GyroMapper
+import com.phonecontroller.app.input.GyroTelemetry
 import com.phonecontroller.app.input.InputTracker
 import com.phonecontroller.app.input.Keycodes
 import com.phonecontroller.app.input.MacroEngine
@@ -73,6 +79,7 @@ import com.phonecontroller.app.input.Motion
 import com.phonecontroller.app.input.MotionAccumulator
 import com.phonecontroller.app.input.TouchpadConfig
 import com.phonecontroller.app.input.TouchpadMapper
+import com.phonecontroller.app.input.resolveGyroActive
 import com.phonecontroller.app.net.ConnState
 import com.phonecontroller.app.net.DeltaEvent
 import com.phonecontroller.app.net.PhoneConnection
@@ -128,6 +135,34 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
     val motion = remember { MotionAccumulator() }
     val gyroSource = remember(context) { AndroidGyroSource(context) }
     val gyroMapper = remember { GyroMapper(activeProfile.gyro) }
+
+    // The pitch gesture mirrors in reverse landscape because the phone's short
+    // axis then points toward the player. Track the live surface rotation and
+    // keep the mapper's chirality in sync without recreating the activity.
+    val view = LocalView.current
+    var displayRotation by remember {
+        mutableStateOf(view.display?.rotation ?: Surface.ROTATION_0)
+    }
+    DisposableEffect(view) {
+        val display = view.display
+        val manager = view.context.getSystemService(DisplayManager::class.java)
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayChanged(displayId: Int) {
+                if (display != null && displayId == display.displayId) {
+                    displayRotation = display.rotation
+                }
+            }
+
+            override fun onDisplayAdded(displayId: Int) = Unit
+
+            override fun onDisplayRemoved(displayId: Int) = Unit
+        }
+        manager?.registerDisplayListener(listener, Handler(Looper.getMainLooper()))
+        onDispose { manager?.unregisterDisplayListener(listener) }
+    }
+    LaunchedEffect(gyroMapper, displayRotation) {
+        gyroMapper.setDisplayRotation(displayRotation)
+    }
     var pressedIds by remember { mutableStateOf(setOf<String>()) }
     var toggledIds by remember { mutableStateOf(setOf<String>()) }
     var runningMacros by remember { mutableStateOf(setOf<String>()) }
@@ -139,9 +174,13 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
     var gyroHeld by remember { mutableStateOf(false) }
     var gyroToggled by remember { mutableStateOf(false) }
     var gyroRegionActive by remember { mutableStateOf(false) }
+    // Mirrors the tracker's reference-counted RMB state for the HUD. The
+    // injection decision is read live in the tick loop, not from this value.
+    var adsHeld by remember { mutableStateOf(false) }
     var gyroCalibrationStatus by remember { mutableStateOf<String?>(null) }
     var pendingCalibration by remember { mutableStateOf<GyroCalibrationResult?>(null) }
     var gyroRatesHz by remember { mutableStateOf(0 to 0) }
+    var gyroTelemetry by remember { mutableStateOf(GyroTelemetry()) }
 
     // Macros run on the Compose/UI dispatcher and feed the same tracker as
     // touch controls. A dropped connection therefore cancels and releases them.
@@ -167,14 +206,21 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
     // and live rate readouts.
     val gyroSensorsWanted = gyroConfig.enabled && !released &&
         !isEditorMode && !showSettings && !showProfileManager
-    val gyroActive = gyroSensorsWanted &&
-        !isEditorMode && !showSettings && !showGyroSettings && !showProfileManager &&
-        when (gyroConfig.activationMode) {
-            GyroActivationMode.ALWAYS -> true
-            GyroActivationMode.HOLD -> gyroHeld
-            GyroActivationMode.TOGGLE -> gyroToggled
-            GyroActivationMode.REGION -> gyroRegionActive
-        }
+    // Gameplay only when no overlay owns the screen. Overlays release inputs
+    // before opening, so ADS cannot stay latched behind one.
+    val gyroPlayActive = gyroSensorsWanted && !showGyroSettings
+    val gyroActive = gyroPlayActive && resolveGyroActive(
+        mode = gyroConfig.activationMode,
+        holdActive = gyroHeld,
+        toggleActive = gyroToggled,
+        regionActive = gyroRegionActive,
+        adsHeld = adsHeld,
+    )
+    // The tuning overlay disarms *injection* but keeps the mapper processing
+    // sensors so its live telemetry reflects the real gameplay pipeline.
+    // ADS-only preview deliberately ignores ADS so the user can tune while
+    // the aim button is not held.
+    val gyroPreview = showGyroSettings && gyroSensorsWanted
 
     // Sensors run only while this profile wants them, saving battery in the
     // editor and on every profile that leaves gyro disabled.
@@ -194,9 +240,21 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
         gyroCalibrationStatus = null
     }
 
-    // Activation state is fed to the mapper on every tick; whether a release
-    // re-primes the neutral pose is controlled by `recenterOnRelease`.
-    val gyroActiveNow by rememberUpdatedState(gyroActive)
+    // Activation is re-evaluated on every tick. Composition does not recompose
+    // when the tracker gains/loses RMB, so ADS must be read live inside the
+    // loop; the lambda carries the freshest manual hold/toggle/region state.
+    val gyroActivationNow by rememberUpdatedState(
+        { ads: Boolean ->
+            gyroPlayActive && resolveGyroActive(
+                mode = gyroConfig.activationMode,
+                holdActive = gyroHeld,
+                toggleActive = gyroToggled,
+                regionActive = gyroRegionActive,
+                adsHeld = ads,
+            )
+        },
+    )
+    val gyroPreviewNow by rememberUpdatedState(gyroPreview)
 
     // 120 Hz gyro tick. Sensor callbacks only publish a mailbox; all mapping,
     // smoothing and Q16.16 encoding happen here on a single thread.
@@ -207,19 +265,40 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
         while (isActive) {
             delay(8)
             val nowNs = System.nanoTime()
+            val adsNow = tracker.isMouseButtonHeld(Protocol.MOUSE_RIGHT)
+            if (adsNow != adsHeld) adsHeld = adsNow
             val gyroTs = gyroSource.readGyro(gyroValues)
             val quatTs = gyroSource.readQuaternion(quaternionValues)
-            gyroMapper.setActive(gyroActiveNow)
+            val previewNow = gyroPreviewNow
+            val activeNow = previewNow || gyroActivationNow(adsNow)
+            gyroMapper.setActive(activeNow)
             val out = gyroMapper.update(
                 gyro = gyroValues,
                 gyroTsNs = gyroTs,
                 quaternion = quaternionValues,
                 quatTsNs = quatTs,
                 nowNs = nowNs,
-                adsActive = tracker.isMouseButtonHeld(Protocol.MOUSE_RIGHT),
+                adsActive = adsNow,
             )
-            if (out.dxQ16 != 0 || out.dyQ16 != 0) motion.add(out)
+            if (!previewNow && activeNow && (out.dxQ16 != 0 || out.dyQ16 != 0)) {
+                // While the tuning overlay is open the mapper runs only as a
+                // live preview; never inject those deltas into the game.
+                motion.add(out)
+            }
             gyroMapper.takeCalibrationResult()?.let { pendingCalibration = it }
+        }
+    }
+
+    // Telemetry is sampled at UI rate, never per sensor sample, so the HUD and
+    // tuning screen do not add recomposition work to the input path.
+    LaunchedEffect(gyroSensorsWanted, showDiagnostics, showGyroSettings) {
+        if (!gyroSensorsWanted || (!showDiagnostics && !showGyroSettings)) {
+            gyroTelemetry = GyroTelemetry()
+            return@LaunchedEffect
+        }
+        while (isActive) {
+            gyroTelemetry = gyroMapper.telemetry()
+            delay(100)
         }
     }
 
@@ -286,6 +365,7 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
             gyroHeld = false
             gyroToggled = false
             gyroRegionActive = false
+            adsHeld = false
             showSettings = false
             showProfileManager = false
             showGyroSettings = false
@@ -350,6 +430,7 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
         gyroHeld = false
         gyroToggled = false
         gyroRegionActive = false
+        adsHeld = false
         if (conn.state.value is ConnState.Paired) {
             if (events.isNotEmpty()) conn.enqueueDelta(events)
             model.scope.launch { runCatching { conn.sendReset() } }
@@ -419,6 +500,7 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
         gyroHeld = false
         gyroToggled = false
         gyroRegionActive = false
+        adsHeld = false
         gyroCalibrationStatus = null
         profileStore.setActiveProfileId(normalized.id)
         model.scope.launch { runCatching { conn.sendProfileInfo(normalized.name) } }
@@ -439,6 +521,7 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
 
     fun updateGyroConfig(next: GyroConfig) {
         val clean = next.sanitized()
+        val modeChanged = clean.activationMode != activeProfile.gyro.activationMode
         val updated = activeProfile.copy(gyro = clean)
         activeProfile = updated
         gyroMapper.setConfig(clean)
@@ -447,6 +530,13 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
             gyroHeld = false
             gyroToggled = false
             gyroRegionActive = false
+            adsHeld = false
+        } else if (modeChanged) {
+            // Do not carry a HOLD/TOGGLE/REGION latch into a different mode.
+            gyroHeld = false
+            gyroToggled = false
+            gyroRegionActive = false
+            gyroMapper.recenter()
         }
         gyroSaveJob?.cancel()
         gyroSaveJob = model.scope.launch {
@@ -503,6 +593,8 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
             orientationLabel = gyroSource.orientationLabel,
             sensorRatesHz = gyroRatesHz,
             active = gyroActive,
+            adsHeld = adsHeld,
+            telemetry = gyroTelemetry,
             calibrationStatus = gyroCalibrationStatus,
             onChange = ::updateGyroConfig,
             onCalibrate = {
@@ -686,6 +778,7 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
                                     GyroActivationMode.TOGGLE -> gyroToggled
                                     GyroActivationMode.ALWAYS -> gyroActive
                                     GyroActivationMode.REGION -> gyroRegionActive
+                                    GyroActivationMode.ADS_ONLY -> gyroActive
                                 }
                             } else {
                                 cell.id in pressedIds
@@ -843,7 +936,13 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
                         modifier = Modifier.height(28.dp),
                     ) {
                         Text(
-                            if (gyroActive) "Gyro ●" else "Gyro",
+                            when {
+                                gyroActive -> "Gyro ●"
+                                gyroConfig.enabled &&
+                                    gyroConfig.activationMode == GyroActivationMode.ADS_ONLY ->
+                                    "Gyro ADS"
+                                else -> "Gyro"
+                            },
                             fontSize = 11.sp,
                             color = if (gyroActive) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurface,
@@ -879,8 +978,11 @@ fun PlayScreen(model: AppModel, conn: PhoneConnection) {
                 runningMacros = runningMacros.size,
                 gyroEnabled = gyroConfig.enabled,
                 gyroActive = gyroActive,
+                gyroMode = gyroConfig.activationMode,
+                adsHeld = adsHeld,
                 gyroRatesHz = gyroRatesHz,
                 gyroSource = gyroConfig.sensorSource.name,
+                gyroTelemetry = gyroTelemetry,
                 onClose = { showDiagnostics = false },
                 modifier = Modifier
                     .align(Alignment.BottomStart)
@@ -905,8 +1007,11 @@ private fun DiagnosticsPanel(
     runningMacros: Int,
     gyroEnabled: Boolean,
     gyroActive: Boolean,
+    gyroMode: GyroActivationMode,
+    adsHeld: Boolean,
     gyroRatesHz: Pair<Int, Int>,
     gyroSource: String,
+    gyroTelemetry: GyroTelemetry,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1003,15 +1108,55 @@ private fun DiagnosticsPanel(
                 when {
                     !gyroEnabled -> "off in profile"
                     gyroActive -> "aiming · $gyroSource"
+                    gyroMode == GyroActivationMode.ADS_ONLY && !adsHeld ->
+                        "inactive · ADS not held"
                     else -> "armed · $gyroSource"
                 },
             )
+            DiagRow(
+                "Gyro mode",
+                when (gyroMode) {
+                    GyroActivationMode.ALWAYS -> "always on"
+                    GyroActivationMode.HOLD -> "hold button"
+                    GyroActivationMode.TOGGLE -> "toggle button"
+                    GyroActivationMode.REGION -> "touch region"
+                    GyroActivationMode.ADS_ONLY -> "ADS only"
+                },
+            )
+            DiagRow("ADS", if (adsHeld) "RMB held" else "not held")
             DiagRow(
                 "Sensor rate",
                 if (gyroEnabled) {
                     "${gyroRatesHz.first} gyro / ${gyroRatesHz.second} ori Hz"
                 } else {
                     "sensors stopped"
+                },
+            )
+            DiagRow(
+                "Gyro rate",
+                when {
+                    !gyroEnabled -> "off in profile"
+                    !gyroActive -> "idle"
+                    gyroTelemetry.intervalMs <= 0f -> "waiting"
+                    else -> String.format(
+                        java.util.Locale.US,
+                        "%.1f / %.1f °/s",
+                        gyroTelemetry.yawRateDps,
+                        gyroTelemetry.pitchRateDps,
+                    )
+                },
+            )
+            DiagRow(
+                "Gyro out",
+                when {
+                    !gyroEnabled || !gyroActive -> "—"
+                    gyroTelemetry.deadzoneActive -> "deadzone"
+                    else -> String.format(
+                        java.util.Locale.US,
+                        "%.1f / %.1f px",
+                        gyroTelemetry.outputDxPx,
+                        gyroTelemetry.outputDyPx,
+                    )
                 },
             )
         }

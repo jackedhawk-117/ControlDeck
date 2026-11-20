@@ -11,7 +11,16 @@ been installed and validated on a motorola edge 70 fusion (Android 17):
 discovery, PIN pairing, UDP keyboard/mouse input, touchpad camera, customizable
 freeform canvas editor, and per-profile switching with receiver RESET
 synchronization. Macros, the diagnostics HUD and gyro aiming are implemented
-and covered by JVM tests; on-device macro execution and gyro validation remain.
+and covered by JVM tests; on-device macro execution remains.
+
+A 2026-11-19 gyro session reworked the flat-phone model twice. Four phyphox
+captures settled it: the vertical gesture is 97.7% rotation about the phone's
+long axis, which the earlier top-edge model could not see. Yaw/pitch now come
+from the gravity-aligned heading and tilt of the physical short axis (+X), with
+roll about that axis ignored and a display-rotation sign for reverse landscape.
+Live sensor data (~199 Hz gyro / ~100 Hz orientation) and an end-to-end
+horizontal sweep were captured. The full far-edge pitch, combined, recenter and
+reverse-landscape acceptance sequence is still pending; see Milestone 7.
 
 A second device session on 2026-11-16 re-verified fresh PIN pairing, Linux
 uinput delivery of mouse left/right/middle, all four joystick axes plus the
@@ -177,29 +186,39 @@ because the phone was not attached during this pass.
 
 - [x] TYPE_GYROSCOPE + TYPE_ROTATION_VECTOR/`TYPE_GAME_ROTATION_VECTOR` collection
       on a dedicated HandlerThread with a locked mailbox and live rate counters
-- [x] Quaternion world-frame yaw/pitch from the screen normal; roll produces no
-      camera movement (yaw/pitch can each be disabled)
+- [x] Quaternion world-frame yaw/pitch from the physical short axis (+X): yaw
+      is its gravity-aligned heading, pitch its tilt; roll about that axis
+      produces no camera movement (yaw/pitch can each be disabled), and the
+      pitch sign follows normal/reverse landscape display rotation
 - [x] Runtime bias auto-calibration while disarmed + explicit 1 s calibration
       with movement rejection; bias persisted per profile
-- [x] Dedicated recenter cell/action; configurable re-prime on hold release
+- [x] Dedicated recenter cell/action; recenter baselines the current pose and
+      emits nothing; configurable re-prime on hold release
 - [x] Deadzone, smoothing, per-axis inversion, sensitivity in px/°, per-tick
       clamp, ADS (RMB) multiplier
-- [x] Activation modes: always / hold / toggle / touch region (region observed
-      in the Initial pointer pass without consuming touches)
-- [x] FUSED (default, drift-free) and GYRO (raw integration) source selection
-- [x] Hybrid touchpad + gyro fusion into one Q16.16 `MotionAccumulator`
+- [x] Activation modes: always on (default) / ADS only / hold / toggle / touch
+      region (region observed in the Initial pointer pass without consuming
+      touches); ADS-only reads the reference-counted logical RMB state from any
+      source and re-primes on entry so re-arming cannot replay a pose jump
+- [x] FUSED (default, drift-free) and GYRO (raw, orientation-framed) sources
+- [x] Hybrid touchpad + gyro fusion into one Q16.16 `MotionAccumulator`; the
+      ADS multiplier scales gyro only
 - [x] Gyro configuration screen, GYRO cell editor, `+ Gyro` control button,
-      FPS preset gyro cells/config, diagnostics state + sensor rates
-- [x] Unit tests with synthetic orientation/gyro data (25 tests), JSON
-      round-trip/legacy/hostile-import tests
-- [b] On-device sensor rates, drift, feel, orientations and hybrid aiming —
-      no adb device attached; see Milestone 7
+      FPS preset gyro cells/config, diagnostics mode/ADS/state/rates/output
+- [x] Unit tests with synthetic orientation/gyro data (52 tests), including
+      vertical/combined capture sweeps, tilt purity, reverse landscape,
+      always-on/ADS-only activation, ADS re-entry, sample-rate independence and
+      hostile config, plus JSON ADS-only round-trip/legacy/hostile
+- [~] On-device sensor rates, yaw signs and one horizontal end-to-end sweep
+      observed (2026-11-19); far-edge pitch, combined motion, Always On/ADS-only
+      gating, recenter, reverse landscape and hybrid aiming pending — see
+      Milestone 7
 
-**Acceptance met (JVM/build):** the Android suite is **124 tests across 15
-classes**, 0 failures, including 25 synthetic gyro/orientation tests and 16
+**Acceptance met (JVM/build):** the Android suite is **153 tests across 15
+classes**, 0 failures, including 52 synthetic gyro/orientation tests and 17
 profile-JSON tests; `assembleDebug` and `lintDebug` pass (0 lint errors), and
-the 56 Rust tests + clippy remain clean. On-device acceptance is intentionally
-not claimed.
+the 56 Rust tests + clippy remain clean. On-device physical acceptance is
+intentionally not claimed.
 
 ## Milestone 7 — Cross-platform validation
 
@@ -216,9 +235,11 @@ not claimed.
 - [ ] Hotspot pairing/input latency capture and long-session soak
 - [ ] On-device profile switching and touchpad-settings persistence
 - [ ] On-device macro editor, step timing, cancel and evtest output verification
-- [ ] On-device gyro pass: sensor rates, FUSED/GYRO drift, calibration,
-      HOLD/TOGGLE/REGION activation, CENTER while aiming, hybrid touchpad +
-      gyro with fire/movement held, all four screen orientations
+- [~] On-device gyro pass: sensor rates and yaw signs observed (2026-11-19);
+      FUSED/GYRO drift, Always On and ADS-only activation, full flat-phone
+      direction/roll/recenter sequence, HOLD/TOGGLE/REGION, CENTER, hybrid
+      touchpad + gyro with fire/movement held, and all four screen orientations
+      still pending
 - [ ] Android on-device multitouch chording, input-latency measurement, soak test
 - [ ] Network interruption / reconnection drills; no stuck inputs
 - [ ] Long-session soak test (≥2 h)
@@ -242,7 +263,7 @@ not claimed.
 | Windows runtime validation | No Windows machine; `SendInput` backend compiles under `cfg(windows)` only | Milestone 7 |
 | QR-code pairing | PIN pairing is implemented; QR adds camera/permission complexity | M8 candidate |
 | mDNS/Avahi advertisement | UDP broadcast + manual IP cover normal and AP-isolated networks | M8 candidate |
-| Gyro device validation | Gyro math, sources, activation modes and calibration are JVM-tested with synthetic data; no physical sensor/drift/in-game validation yet | Milestone 7 |
+| Gyro device validation | Gyro math, sources, Always On/ADS-only activation, recentering and calibration are JVM-tested with synthetic data; live rates and yaw signs were observed on 2026-11-19, but the full physical acceptance, Always On/ADS-only gating, drift and in-game validation remain pending | Milestone 7 |
 | Macro device validation | Macro model/engine/editor and diagnostics are JVM-tested (96 tests); the phone was not attached for on-device evtest of macro output and the new editor UI | Milestone 7 |
 | SPAKE2 pairing | Current HKDF+HMAC PIN scheme allows offline PIN brute force from a recorded handshake; LAN-scoped threat model | Security upgrade path |
 | Compose BOM pinned to 2026.06.01 | Newer BOMs require compileSdk 37, while this environment has SDK 36 | Revisit when SDK 37 is installed |

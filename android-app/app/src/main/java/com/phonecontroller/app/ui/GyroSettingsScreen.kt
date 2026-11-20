@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import com.phonecontroller.app.input.GyroActivationMode
 import com.phonecontroller.app.input.GyroConfig
 import com.phonecontroller.app.input.GyroSensorSource
+import com.phonecontroller.app.input.GyroTelemetry
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -46,6 +47,8 @@ fun GyroSettingsScreen(
     orientationLabel: String,
     sensorRatesHz: Pair<Int, Int>,
     active: Boolean,
+    adsHeld: Boolean,
+    telemetry: GyroTelemetry,
     calibrationStatus: String?,
     onChange: (GyroConfig) -> Unit,
     onCalibrate: () -> Unit,
@@ -74,7 +77,9 @@ fun GyroSettingsScreen(
                     fontSize = 20.sp,
                 )
                 Text(
-                    "Yaw and pitch of the screen normal drive the camera. Roll is ignored.",
+                    "Hold the phone flat. Rotate left/right to aim horizontally; "
+                        + "lift or lower the far edge to aim vertically. Twist about "
+                        + "the phone's short axis is ignored.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 11.sp,
                 )
@@ -131,7 +136,8 @@ fun GyroSettingsScreen(
                     color = MaterialTheme.colorScheme.primary,
                 )
                 Text(
-                    "Gyro ${sensorRatesHz.first} Hz · $orientationLabel ${sensorRatesHz.second} Hz",
+                    "Gyro ${sensorRatesHz.first} Hz · $orientationLabel ${sensorRatesHz.second} Hz"
+                        + " · ${config.sensorSource.name}",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
@@ -139,8 +145,42 @@ fun GyroSettingsScreen(
                     "Status: ${when {
                         !config.enabled -> "disabled in this profile"
                         active -> "aiming active"
+                        telemetry.intervalMs > 0f &&
+                            config.activationMode == GyroActivationMode.ADS_ONLY &&
+                            !adsHeld -> "live preview · ADS (RMB) not held"
+                        telemetry.intervalMs > 0f -> "live preview (not sent while tuning)"
+                        config.activationMode == GyroActivationMode.ADS_ONLY && !adsHeld ->
+                            "inactive · ADS (RMB) not held"
                         else -> "armed, waiting for activation"
                     }}",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "ADS: ${if (adsHeld) "RMB held" else "not held"}",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    String.format(
+                        Locale.US,
+                        "Live yaw %.1f · pitch %.1f °/s",
+                        telemetry.yawRateDps,
+                        telemetry.pitchRateDps,
+                    ) +
+                        if (telemetry.deadzoneActive) " · deadzone" else "",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    String.format(
+                        Locale.US,
+                        "Filtered %.1f · %.1f °/s · out %.1f · %.1f px",
+                        telemetry.filteredYawRateDps,
+                        telemetry.filteredPitchRateDps,
+                        telemetry.outputDxPx,
+                        telemetry.outputDyPx,
+                    ),
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -156,10 +196,11 @@ fun GyroSettingsScreen(
         ChoiceRow(
             label = "Activation",
             options = listOf(
-                GyroActivationMode.ALWAYS.name to "Always",
-                GyroActivationMode.HOLD.name to "Hold button",
-                GyroActivationMode.TOGGLE.name to "Toggle button",
-                GyroActivationMode.REGION.name to "Touch region",
+                GyroActivationMode.ALWAYS.name to "Always on",
+                GyroActivationMode.ADS_ONLY.name to "ADS only",
+                GyroActivationMode.HOLD.name to "Hold",
+                GyroActivationMode.TOGGLE.name to "Toggle",
+                GyroActivationMode.REGION.name to "Region",
             ),
             selected = config.activationMode.name,
             onSelect = { name ->
@@ -170,6 +211,15 @@ fun GyroSettingsScreen(
                     ),
                 )
             },
+        )
+
+        Text(
+            "Always on is the default: gyro aims throughout gameplay and the "
+                + "logical right button only applies the ADS multiplier. ADS only "
+                + "disables gyro unless RMB is held, whether it comes from a "
+                + "touchscreen button, a key combination or a macro.",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         ChoiceRow(
@@ -190,9 +240,21 @@ fun GyroSettingsScreen(
         )
 
         Text(
-            "Fused uses the rotation vector and never drifts; raw gyro runs at the "
-                + "input tick rate and drifts until you recenter. Both need calibration "
-                + "to remove hand tremor at rest.",
+            "Fused uses the rotation vector, is drift-free and needs only "
+                + "recentering. Raw gyro integrates the calibrated rate and drifts "
+                + "until you recenter. Bias calibration applies to the raw-gyro "
+                + "source; fused ignores it.",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Text(
+            "Yaw is the gravity-aligned heading of the phone's short axis; pitch is "
+                + "its tilt. Recenter captures the current heading and tilt, so the "
+                + "absolute grip angle and a slightly off-level hold do not matter. "
+                + "Roll about that short axis is ignored by design: it is removed "
+                + "by the mapping itself, so there is no roll component to disable. "
+                + "Pitch follows normal or reverse landscape automatically.",
             fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -212,7 +274,7 @@ fun GyroSettingsScreen(
             onChange = { onChange(config.copy(sensitivityY = it)) },
         )
         TuningSlider(
-            label = "Aim (ADS/RMB) multiplier",
+            label = "ADS gyro multiplier (RMB, gyro only)",
             valueLabel = "×${formatGyro(config.adsMultiplier)}",
             value = config.adsMultiplier,
             range = GyroConfig.MIN_ADS_MULTIPLIER..GyroConfig.MAX_ADS_MULTIPLIER,
@@ -367,9 +429,11 @@ fun GyroSettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    "Calibration samples the gyroscope for one second; keep the phone "
-                        + "still on a stable surface. Recentering stores the current "
-                        + "pose as neutral without moving the camera.",
+                    "Recenter establishes the flat-phone reference: hold the phone "
+                        + "in your neutral aiming pose, then press Recenter. Bias "
+                        + "calibration samples the gyroscope for one second and "
+                        + "applies to the raw-gyro source; keep the phone still on a "
+                        + "stable surface.",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -389,7 +453,7 @@ fun GyroSettingsScreen(
                         onClick = onCalibrate,
                         enabled = config.enabled && gyroAvailable && orientationAvailable,
                     ) {
-                        Text("Calibrate (1 s)")
+                        Text("Calibrate raw-gyro bias (1 s)")
                     }
                 }
             }

@@ -6,8 +6,8 @@ Two applications, one versioned binary protocol. **No gamepad emulation.**
 > This document describes the target architecture. The living implementation
 > status is in [`docs/PLAN.md`](docs/PLAN.md); Milestones 1–6 implement the
 > transport, pairing, input state machine, Linux/Windows backends, freeform
-> editor, profiles, macros, diagnostics and gyro aiming. On-device gyro and
-> macro validation remain Milestone 7 work.
+> editor, profiles, macros, diagnostics and gyro aiming. The full physical gyro
+> acceptance sequence and on-device macro validation remain Milestone 7 work.
 
 ```
 ┌─────────────────────────── Android (Kotlin) ───────────────────────────┐
@@ -17,8 +17,8 @@ Two applications, one versioned binary protocol. **No gamepad emulation.**
 │ │ Grid editor    │──▶│ touch, pointer IDs) │──▶│  broadcast)      │   │
 │ │ Play screen    │   │ Touchpad cell       │   │ Control (TCP)    │   │
 │ │ Gyro/TP config │   │ Gyro mapper (quat.  │   │  pairing+auth    │   │
-│ │ Profile mgr    │   │  world-frame yaw/   │   │ Input (UDP)      │   │
-│ │ Macro editor   │   │  pitch, fusion)     │   │  AES-256-GCM     │   │
+│ │ Profile mgr    │   │  short-axis gravity │   │ Input (UDP)      │   │
+│ │ Macro editor   │   │  yaw/pitch, fusion) │   │  AES-256-GCM     │   │
 │ │ Diagnostics    │   │ Macros (phone-side) │   │  heartbeat/STATS │   │
 │ └────────────────┘   └─────────────────────┘   └────────┬─────────┘   │
 │  Profiles: versioned JSON, all scaling/sensitivity phone-side          │
@@ -70,8 +70,8 @@ Crate / module map:
 
 ```
 touch/sensor event (Android)
-  → input pipeline @120 Hz tick: grid cells, touchpad filter, gyro world-frame
-    mapping, fusion into one mouse-delta accumulator (phone applies sensitivity)
+  → input pipeline @120 Hz tick: grid cells, touchpad filter, gyro gravity-frame
+    short-axis mapping, fusion into one mouse-delta accumulator (phone applies sensitivity)
   → INPUT_DELTA packet (events batched, ≤1400 B, seq++, encrypted, UDP)
   → receiver UDP task: decrypt (session lookup), parse, feed session pipeline
   → input-core state machine: dedupe, held-set, sub-pixel remainder
@@ -106,7 +106,7 @@ on WLAN.
 | **Wayland input permissions** | uinput creates a kernel evdev device; Wayland compositors read it like any HID device. No compositor-specific API needed. The real gate is `/dev/uinput` write access. | `input` group membership or a udev rule (see `docs/linux-setup.md`); receiver preflights `/dev/uinput` and prints exact remediation. |
 | **Steam / Proton games** | SDL and raw-input stacks enumerate evdev devices; a uinput keyboard/mouse is indistinguishable from hardware. | Verified via SDL test harness readback (Milestone 7); no special-casing. |
 | **uinput unavailable / no permission** | Common on stock setups. | Explicit preflight + clear instructions; never silently fall back to X11 tools (would break Wayland). |
-| **Gyro → mouse correctness** | Naive accelerometer mapping is unusable. | Default FUSED path derives yaw/pitch from the world-space screen-normal heading/elevation (roll ignored, drift-free); optional raw-gyro path integrates calibrated world-frame angular velocity using sensor timestamps. Bias auto-calibration while disarmed plus explicit 1 s calibration; recenter; deadzone/smoothing; ADS multiplier. No raw sensor data crosses the wire — only final deltas (protocol stays lean). |
+| **Gyro → mouse correctness** | Naive accelerometer mapping is unusable; the player's far-edge pitch is a rotation about the phone's long axis, which leaves a top-edge vector nearly invariant. | Default FUSED path derives yaw/pitch from the gravity-aligned world-space heading and tilt of the physical short axis (+X), so long-axis pitch is measured directly and roll about the short axis is ignored exactly; pitch sign follows the live display rotation. Optional raw-gyro path rotates calibrated device rates into the world frame using sensor timestamps. Bias auto-calibration while disarmed plus explicit 1 s calibration; recenter; deadzone/smoothing; ADS multiplier. Activation is Always On by default or optionally ADS-only, gated by the tracker's reference-counted logical RMB state so any input source works and release cannot leave gyro armed; ADS entry re-primes to avoid a jump. No raw sensor data crosses the wire — only final deltas (protocol stays lean). |
 | **Packet loss / reorder on Wi-Fi** | UDP is lossy by design. | Event deltas + 1 Hz snapshots + idempotent state machine; sequence numbers; receiver drops stale seq but never releases held keys on a single loss (only on real disconnect conditions). |
 | **Windows anti-cheat / elevated apps** | `SendInput` cannot inject into elevated processes from a non-elevated receiver; some anti-cheats flag synthetic input. | Documented in `docs/windows-setup.md` (run receiver elevated for elevated games; no anti-cheat bypass is implemented, by charter). |
 | **Broadcast discovery blocked (AP isolation)** | Guest/IoT VLANs commonly block broadcast. | Manual IP entry is first-class in the UI; mDNS advertisement is a tracked follow-up. |

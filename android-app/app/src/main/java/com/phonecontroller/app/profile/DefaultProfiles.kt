@@ -199,14 +199,14 @@ object DefaultProfiles {
         return GameProfile(
             id = FPS_PROFILE_ID,
             name = "First-Person Shooter",
-            description = "Unconstrained canvas layout with analog WASD joystick, jump, sprint, aim/fire triggers and hold-to-aim gyro with recenter.",
+            description = "Unconstrained canvas layout with analog WASD joystick, jump, sprint, aim/fire triggers and always-on gyro aiming with recenter.",
             rows = 3,
             cols = 4,
             cells = cells,
             touchpad = TouchpadConfig(sensitivityX = 0.85f, sensitivityY = 0.85f, acceleration = 0.20f),
             gyro = GyroConfig(
                 enabled = true,
-                activationMode = GyroActivationMode.HOLD,
+                activationMode = GyroActivationMode.ALWAYS,
                 sensorSource = GyroSensorSource.FUSED,
                 sensitivityX = 2.6f,
                 sensitivityY = 2.2f,
